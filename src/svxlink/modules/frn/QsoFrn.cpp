@@ -537,23 +537,10 @@ void QsoFrn::reconnect(void)
 {
   bool is_using_backup_server = (server == opt_server_backup && port == opt_port_backup);
 
-  reconnect_timeout_ms = static_cast<int>(reconnect_timeout_ms * RECONNECT_BACKOFF);
-  if (reconnect_timeout_ms > RECONNECT_MAX_TIMEOUT) {
-    reconnect_timeout_ms = RECONNECT_MAX_TIMEOUT;
-  }
+  reconnect_timeout_ms = static_cast<int>(RECONNECT_TIMEOUT_TIME);
 
-  if (connect_retry_cnt++ < MAX_CONNECT_RETRY_CNT)
-  {
-    cout << "reconnecting #" << connect_retry_cnt << endl;
-    connect(!is_using_backup_server);
-  }
-  else
-  {
-    cerr << "failed to reconnect " << MAX_CONNECT_RETRY_CNT << " times" << endl;
-    connect_retry_cnt = 0;
-    reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
-    setState(STATE_ERROR);
-  }
+  cout << "reconnecting #" << connect_retry_cnt << endl;
+  connect(!is_using_backup_server);
 }
 
 

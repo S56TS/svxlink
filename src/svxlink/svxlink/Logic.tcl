@@ -5,6 +5,12 @@
 ###############################################################################
 
 #
+# A global variable used to store time for WDS signal timer and FRn restart timer.
+#
+variable frn_time_sec 0;
+variable wds_time_min 0;
+
+#
 # This is the namespace in which all functions and variables below will exist.
 #
 namespace eval Logic {
@@ -770,6 +776,18 @@ if [info exists CFG_LONG_VOICE_ID_ENABLE] {
 
 if [info exists CFG_LONG_CW_ID_ENABLE] {
   set long_cw_id_enable $CFG_LONG_CW_ID_ENABLE
+}
+
+if [info exists CFG_FRN_RESTART_INTERVAL] {
+  if {$CFG_FRN_RESTART_INTERVAL > 0} {
+    set frn_time_sec $CFG_FRN_RESTART_INTERVAL;
+  }
+}
+
+if [info exists CFG_WDS_SIGNAL_INTERVAL] {
+  if {$CFG_WDS_SIGNAL_INTERVAL > 0} {
+    set wds_time_min $CFG_WDS_SIGNAL_INTERVAL;
+  }
 }
 
 

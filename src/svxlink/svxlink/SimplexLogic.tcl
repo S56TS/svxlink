@@ -20,13 +20,33 @@ if {$logic_name != [namespace tail [namespace current]]} {
 
 
 #
+# A variable used to time for restart timer for FRN module [sec].
+#
+variable frn_timer_sec 0;
+
+
+#
+# A variable used to time for WDS watchdog signal [min].
+#
+variable wds_timer_min;
+
+
+#
 # Executed when the SvxLink software is started
 #
 proc startup {} {
   global logic_name;
+  global wds_time_min;
+  global frn_time_sec;
+  variable frn_timer_sec;
+  variable wds_timer_min;
   append func $logic_name "::checkPeriodicIdentify";
   Logic::addMinuteTickSubscriber $func;
   Logic::startup;
+
+  # run FRN module
+  set wds_timer_min $wds_time_min;
+  set frn_timer_sec $frn_time_sec;
 }
 
 
@@ -164,6 +184,16 @@ proc link_already_active {name} {
 # Executed once every whole minute
 #
 proc every_minute {} {
+  global wds_time_min;
+  variable wds_timer_min;
+
+  if {$wds_timer_min > 0} {
+    set wds_timer_min [expr $wds_timer_min - 1];
+    if {wds_timer_min == 0} {
+      puts "SimplexLogic: WDS signal"
+      set wds_timer_min  $wds_time_min;
+    }
+  }
   Logic::every_minute;
 }
 
@@ -172,6 +202,20 @@ proc every_minute {} {
 # Executed once every second
 #
 proc every_second {} {
+  global active_module;
+  global frn_time_sec;
+  variable frn_timer_sec;
+
+  if {$frn_timer_sec > 0} {
+    set frn_timer_sec [expr $frn_timer_sec - 1];
+    if {$frn_timer_sec == 0} {
+      if {$active_module == ""} {
+        puts "SimplexLogic: FRN restart timer elapsed. No active module, activating FRN module."
+        injectDtmf 2#;
+      }
+      set frn_timer_sec $frn_time_sec;
+    }
+  }
   Logic::every_second;
 }
 
@@ -209,6 +253,10 @@ proc checkPeriodicIdentify {} {
 # return 0 to make SvxLink continue processing as normal.
 #
 proc dtmf_digit_received {digit duration} {
+  global frn_time_sec;
+  variable frn_timer_sec;
+  
+  set frn_timer_sec $frn_time_sec;
   return [Logic::dtmf_digit_received $digit $duration];
 }
 
@@ -221,6 +269,10 @@ proc dtmf_digit_received {digit duration} {
 # return 0 to make SvxLink continue processing as normal.
 #
 proc dtmf_cmd_received {cmd} {
+  global frn_time_sec;
+  variable frn_timer_sec;
+  
+  set frn_timer_sec $frn_time_sec;
   return [Logic::dtmf_cmd_received $cmd];
 }
 
