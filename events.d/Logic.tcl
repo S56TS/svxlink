@@ -438,14 +438,9 @@ proc link_already_active {name} {
 #   is_on - Set to 1 if the transmitter is on or 0 if it's off
 #
 proc transmit {args} {
-  #printInfo "Turning the transmitter $is_on"
-
-  # Backwards/forwards compatible argument handling:
+  # Backwards/forwards compatible:
   #   transmit <is_on>
   #   transmit <tx_id> <is_on>
-  #
-  # If called with tx_id, it will be stored in the variable active_tx_id
-  # to be used by local override scripts (e.g. AIORS LED handling).
   variable active_tx_id
 
   set argc [llength $args]
@@ -463,15 +458,12 @@ proc transmit {args} {
     set active_tx_id ""
   }
 
-  #printInfo "Turning the transmitter $is_on"
   variable prev_ident
   variable need_ident
   if {$is_on && ([clock seconds] - $prev_ident > 5)} {
     set need_ident 1
   }
-
 }
-
 
 
 #

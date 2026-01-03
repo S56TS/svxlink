@@ -1135,8 +1135,35 @@ void Logic::transmitterStateChange(bool is_transmitting)
     LocationInfo::instance()->setTransmitting(name(), is_transmitting);
   }
 
-  stringstream ss;
-  ss << "transmit " << (is_transmitting ? "1" : "0");
+  // AIORS/compat: emit TX id as first argument:
+  //   transmit tx_id is_on
+  // where tx_id is derived from the configured TX name (Tx1->0, Tx2->1, ...).
+  int tx_id = 0;
+  const std::string tx_name = tx().name();
+  int num = 0;
+  int mult = 1;
+  bool has_digits = false;
+  for (int i = static_cast<int>(tx_name.size()) - 1; i >= 0; --i)
+  {
+    const char c = tx_name[static_cast<size_t>(i)];
+    if (std::isdigit(static_cast<unsigned char>(c)))
+    {
+      has_digits = true;
+      num += (c - '0') * mult;
+      mult *= 10;
+    }
+    else
+    {
+      break;
+    }
+  }
+  if (has_digits && (num > 0))
+  {
+    tx_id = num - 1;
+  }
+
+  std::stringstream ss;
+  ss << "transmit " << tx_id << " " << (is_transmitting ? "1" : "0");
   processEvent(ss.str());
 } /* Logic::transmitterStateChange */
 

@@ -811,6 +811,7 @@ void QsoFrn::onConnected(void)
   connect_retry_cnt = 0;
   reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
   con_timeout_timer->setEnable(true);
+  con_timeout_timer->reset();
   login();
 }
 
@@ -937,14 +938,17 @@ void QsoFrn::onSendBufferFull(bool is_full)
 
 void QsoFrn::onConnectTimeout(Timer *timer)
 {
-  //cout << __FUNCTION__ << endl;
-  if (state == STATE_IDLE)
+  // If we are "connected" but no data has been received for too long we may
+  // be stuck after a link flap (e.g. Ethernet unplug/replug). Force a reconnect
+  // in *any* state except DISCONNECTED.
+  if (state != STATE_DISCONNECTED)
   {
+    cout << "FRN connection watchdog timeout in state "
+         << stateToString(state) << " -> reconnect" << endl;
     disconnect();
     reconnect();
   }
 }
-
 
 void QsoFrn::onRxTimeout(Timer *timer)
 {
@@ -997,4 +1001,3 @@ void QsoFrn::onDelayedReconnect(Async::Timer *timer)
 /*
  * This file has not been truncated
  */
-

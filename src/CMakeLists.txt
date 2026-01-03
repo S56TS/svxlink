@@ -338,6 +338,21 @@ if(USE_QT)
   add_subdirectory(qtel)
 endif(USE_QT)
 
+
+# aiors package install
+install(
+  FILES
+    ${CMAKE_CURRENT_LIST_DIR}/../events.d/local/Logic.tcl
+    ${CMAKE_CURRENT_LIST_DIR}/../events.d/local/aiors.tcl
+  DESTINATION ${SVX_SHARE_INSTALL_DIR}/events.d/local
+)
+
+install(
+  FILES ${CMAKE_CURRENT_LIST_DIR}/../events.d/aiors/SimplexLogic.tcl
+  DESTINATION ${SVX_SHARE_INSTALL_DIR}/events.d/aiors
+)
+
+
 # Experimental CPack package building
 set(CPACK_SET_DESTDIR "ON")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
