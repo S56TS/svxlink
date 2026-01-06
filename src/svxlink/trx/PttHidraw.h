@@ -39,14 +39,6 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 /****************************************************************************
  *
- * Project Includes
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
  * Local Includes
  *
  ****************************************************************************/
@@ -56,55 +48,10 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 /****************************************************************************
  *
- * Forward declarations
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Namespace
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Forward declarations of classes inside of the declared namespace
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Defines & typedefs
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Exported Global Variables
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
  * Class definitions
  *
  ****************************************************************************/
 
-/**
-@brief  A PTT hardware controller using the Hidraw-Board from DMK
-@author Tobias Blomberg / SM0SVX
-@date   2014-09-17
-*/
 class PttHidraw : public Ptt
 {
   public:
@@ -113,29 +60,10 @@ class PttHidraw : public Ptt
       Factory(void) : PttFactory<PttHidraw>("Hidraw") {}
     };
 
-    /**
-     * @brief 	Default constructor
-     */
     PttHidraw(void);
-
-    /**
-     * @brief 	Destructor
-     */
     ~PttHidraw(void);
 
-    /**
-     * @brief 	Initialize the PTT hardware
-     * @param 	cfg An initialized config object
-     * @param   name The name of the config section to read config from
-     * @returns Returns \em true on success or else \em false
-     */
     virtual bool initialize(Async::Config &cfg, const std::string name);
-
-    /**
-     * @brief 	Set the state of the PTT, TX on or off
-     * @param 	tx_on Set to \em true to turn the transmitter on
-     * @returns Returns \em true on success or else \em false
-     */
     virtual bool setTxOn(bool tx_on);
 
   protected:
@@ -143,8 +71,14 @@ class PttHidraw : public Ptt
   private:
     bool active_low;
 
+    std::string device;
+    bool        disconnected_logged;
+
     int   fd;
     char  pin;
+
+    bool openDevice(void);
+    void closeDevice(void);
 
     PttHidraw(const PttHidraw&);
     PttHidraw& operator=(const PttHidraw&);

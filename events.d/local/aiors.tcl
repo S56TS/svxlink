@@ -1,15 +1,11 @@
 # AIORS local entry point (single place for AIORS behavior)
 # Loaded via: events.d/local/Logic.tcl (which first loads SvxLink base Logic.tcl)
 #
-# FIX: RX hook may appear after startup. We now poll until it exists.
+# FIX: Do NOT override global squelch_open proc with wrong args.
 # - RX LED follows RAW squelch
 # - Time-only min-open gating before forwarding OPEN to base logic
 # - TX LED follows transmit
 # - Single courtesy/roger beep with debounce + startup suppress
-#
-# Install:
-#   /usr/share/svxlink/events.d/local/aiors.tcl
-# and restart svxlink.
 
 printInfo "AIORS: local/aiors.tcl loaded"
 
@@ -61,33 +57,9 @@ proc ::AIORS::_refresh_namespaces {} {
   set ::AIORS::logic_ns "::${ln}::Logic"
 }
 
-# ---- Debug: show COS vs CTCSS on SQL transitions ----
-
-# Called when squelch opens
-proc squelch_open {rx_id} {
-  # If SvxLink exports any CTCSS status variables, print them.
-  # (Different versions/configs export different vars, so we log whatever exists.)
-
-  set msg "RX$rx_id SQL OPEN"
-
-  foreach v {
-    ::Logic::sql_open_type
-    ::Logic::sql_rx_id
-    ::Logic::ctcss
-    ::Logic::ctcss_hz
-    ::Logic::ctcss_ok
-    ::Logic::tone_detected
-    ::Logic::subtone_detected
-  } {
-    if {[info exists $v]} { append msg " $v=[set $v]" }
-  }
-
-  puts $msg
-}
-
-# Called when squelch closes
-proc squelch_close {rx_id} {
-  set msg "RX$rx_id SQL CLOSED"
+# ---- Debug helpers (NOTE: do NOT use global names squelch_open/close) ----
+proc ::AIORS::dbg_squelch {rx_id is_open} {
+  set msg "AIORS DBG: RX$rx_id SQL [expr {$is_open ? "OPEN" : "CLOSED"}]"
   foreach v {
     ::Logic::sql_open_type
     ::Logic::sql_rx_id
@@ -199,11 +171,8 @@ proc ::AIORS::_install_beep_override {} {
     set ::AIORS::last_beep_ts $now
 
     if {$::AIORS::debug} { printInfo "AIORS DBG: send_rgr_sound -> BEEP" }
-    # Guard so the tone starts after TX key-up / TX_DELAY
     playSilence 900
-    # Single courtesy beep
     playTone 440 900 120
-    # Tail guard so the end is not clipped
     playSilence 300
   }
 
@@ -239,46 +208,43 @@ proc ::AIORS::_try_install_tx_hook {} {
 proc ::AIORS::_try_install_rx_hook {} {
   if {$::AIORS::hooked_rx} { return 1 }
 
-  # Events call instance: ::SimplexLogic::squelch_open
-  foreach name [list "${::AIORS::inst_ns}::squelch_open" "${::AIORS::logic_name}::squelch_open" "${::AIORS::logic_ns}::squelch_open"] {
-    if {[info procs $name] eq ""} { continue }
+  ::AIORS::_refresh_namespaces
 
-    if {[::AIORS::_wrap $name {
-      catch { ::AIORS::ensure_hooks }
-      if {[llength $args] != 2} {
-        return [uplevel 1 [list @ORIG@ {*}$args]]
-      }
+  # Candidate procs depending on SvxLink version/logic type
+  set candidates [list \
+    "${::AIORS::logic_ns}::squelch_open" \
+    "${::AIORS::inst_ns}::squelch_open" \
+    "squelch_open" \
+  ]
 
-      set rx_id   [lindex $args 0]
-      set is_open [lindex $args 1]
+  foreach p $candidates {
+    if {[info procs $p] eq ""} {
+      if {$::AIORS::debug} { printInfo "AIORS DBG: RX hook candidate missing: $p" }
+      continue
+    }
 
-      if {![info exists ::AIORS::rx_allowed_open($rx_id)]} { set ::AIORS::rx_allowed_open($rx_id) 0 }
-      if {![info exists ::AIORS::rx_raw_open_ts($rx_id)]}  { set ::AIORS::rx_raw_open_ts($rx_id) 0 }
-
-      # LED follows raw squelch
-      ::AIORS::led_rx $rx_id $is_open
-
-      if {$is_open} {
-        ::AIORS::_raw_open $rx_id
-        ::AIORS::_set_allowed $rx_id 0
-        after $::AIORS::min_rx_open_ms [list ::AIORS::_gate_try_forward $rx_id @ORIG@]
-        return
-      } else {
-        ::AIORS::_raw_close $rx_id
-        if {[::AIORS::_is_allowed $rx_id]} {
-          ::AIORS::_set_allowed $rx_id 0
-          set ::AIORS::last_valid_close_ts [clock milliseconds]
-          return [uplevel 1 [list @ORIG@ $rx_id 0]]
-        } else {
-          return
-        }
-      }
-    }]} {
+    # Already wrapped?
+    if {[info procs "${p}__aiors_orig"] ne ""} {
       set ::AIORS::hooked_rx 1
-      printInfo "AIORS: RX gating hooked via $name"
+      printInfo "AIORS: RX LED already hooked via $p"
       return 1
     }
+
+    rename $p "${p}__aiors_orig"
+
+    proc $p {rx_id is_open} [string map [list "@ORIG@" "${p}__aiors_orig"] {
+      catch { ::AIORS::led_rx $rx_id $is_open }
+      if {$::AIORS::debug} {
+        printInfo "AIORS DBG: RX squelch rx_id=$rx_id is_open=$is_open (via [lindex [info level 0] 0])"
+      }
+      return [@ORIG@ $rx_id $is_open]
+    }]
+
+    set ::AIORS::hooked_rx 1
+    printInfo "AIORS: RX LED hooked via $p"
+    return 1
   }
+
   return 0
 }
 
@@ -289,7 +255,7 @@ proc ::AIORS::ensure_hooks {} {
   ::AIORS::_install_beep_override
 
   if {!$::AIORS::hooked_rx} {
-    if {$::AIORS::debug} { printInfo "AIORS DBG: RX hook not found yet, retry..." }
+    #if {$::AIORS::debug} { printInfo "AIORS DBG: RX hook not found yet, retry..." }
     after 200 ::AIORS::ensure_hooks
   }
   return 1

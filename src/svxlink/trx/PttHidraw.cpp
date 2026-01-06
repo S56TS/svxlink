@@ -33,18 +33,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include <iostream>
+#include <cstring>
+#include <cerrno>
 #include <unistd.h>
 #include <fcntl.h>
 #include <linux/hidraw.h>
 #include <sys/ioctl.h>
-
-
-/****************************************************************************
- *
- * Project Includes
- *
- ****************************************************************************/
-
 
 
 /****************************************************************************
@@ -70,69 +64,24 @@ using namespace Async;
 
 /****************************************************************************
  *
- * Defines & typedefs
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Local class definitions
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Prototypes
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Exported Global Variables
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Local Global Variables
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
  * Public member functions
  *
  ****************************************************************************/
 
 PttHidraw::PttHidraw(void)
-  : active_low(false), fd(-1), pin(0)
+  : active_low(false), device(), disconnected_logged(false), fd(-1), pin(0)
 {
 } /* PttHidraw::PttHidraw */
 
 
 PttHidraw::~PttHidraw(void)
 {
-  if (fd >= 0)
-  {
-    close(fd);
-    fd = -1;
-  }
+  closeDevice();
 } /* PttHidraw::~PttHidraw */
 
 
 bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
 {
-
   map<string, char> pin_mask;
   pin_mask["GPIO1"] = 0x01;
   pin_mask["GPIO2"] = 0x02;
@@ -153,9 +102,11 @@ bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
     return false;
   }
 
-  if ((fd = open(hidraw_dev.c_str(), O_WRONLY, 0)) < 0)
+  device = hidraw_dev;
+  if (!openDevice())
   {
-    cerr << "*** ERROR: Can't open port " << hidraw_dev << endl;
+    cerr << "*** ERROR: Can't open port " << device << ": "
+         << strerror(errno) << endl;
     return false;
   }
 
@@ -200,7 +151,7 @@ bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
     return false;
   }
 
-  if (hidraw_pin[0] == '!')
+  if (!hidraw_pin.empty() && hidraw_pin[0] == '!')
   {
     active_low = true;
     hidraw_pin.erase(0, 1);
@@ -221,38 +172,57 @@ bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
 
 bool PttHidraw::setTxOn(bool tx_on)
 {
-  //cerr << "### PttHidraw::setTxOn(" << (tx_on ? "true" : "false") << ")\n";
-
   char a[5] = {'\000', '\000',
               (tx_on ^ active_low ? pin : '\000'), pin, '\000'};
 
-  if (write(fd, a, sizeof(a)) == -1)
+  if (fd < 0 && !openDevice())
   {
     return false;
   }
 
+  if (write(fd, a, sizeof(a)) == -1)
+  {
+    // Typical after USB disconnect: ENODEV/EIO/EBADF. Close and let next TX retry.
+    if (!disconnected_logged)
+    {
+      cerr << "*** ERROR: writing HID_DEVICE (" << device << ") failed: "
+           << strerror(errno) << " -- will retry" << endl;
+      disconnected_logged = true;
+    }
+    closeDevice();
+    return false;
+  }
+
+  disconnected_logged = false;
   return true;
 } /* PttHidraw::setTxOn */
 
 
+void PttHidraw::closeDevice(void)
+{
+  if (fd >= 0)
+  {
+    close(fd);
+    fd = -1;
+  }
+}
 
-/****************************************************************************
- *
- * Protected member functions
- *
- ****************************************************************************/
 
+bool PttHidraw::openDevice(void)
+{
+  closeDevice();
+  if (device.empty())
+  {
+    errno = EINVAL;
+    return false;
+  }
 
-
-/****************************************************************************
- *
- * Private member functions
- *
- ****************************************************************************/
+  fd = open(device.c_str(), O_WRONLY, 0);
+  return (fd >= 0);
+}
 
 
 
 /*
  * This file has not been truncated
  */
-

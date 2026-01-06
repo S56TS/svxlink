@@ -69,40 +69,6 @@ namespace Async
 
 /****************************************************************************
  *
- * Namespace
- *
- ****************************************************************************/
-
-//namespace MyNameSpace
-//{
-
-
-/****************************************************************************
- *
- * Forward declarations of classes inside of the declared namespace
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Defines & typedefs
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Exported Global Variables
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
  * Class definitions
  *
  ****************************************************************************/
@@ -145,6 +111,11 @@ class SquelchHidraw : public Squelch
   private:
     int             fd;
     Async::FdWatch  *watch;
+    Async::Timer    *reopen_timer;
+    std::string     device;
+    std::string     rx_name;
+    unsigned        reopen_delay_ms;
+    bool            disconnected_logged;
     bool            active_low;
     char            pin;
 
@@ -152,16 +123,17 @@ class SquelchHidraw : public Squelch
     SquelchHidraw& operator=(const SquelchHidraw&);
     void hidrawActivity(Async::FdWatch *watch);
 
-};  /* class SquelchGpio */
+    void closeDevice(void);
+    bool openDevice(void);
+    void scheduleReopen(unsigned delay_ms);
+    void tryReopen(Async::Timer *t);
 
+};  /* class SquelchHidraw */
 
-//} /* namespace */
 
 #endif /* SQUELCH_HIDRAW_INCLUDED */
-
 
 
 /*
  * This file has not been truncated
  */
-

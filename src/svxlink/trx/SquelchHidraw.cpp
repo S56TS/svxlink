@@ -48,6 +48,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include <AsyncFdWatch.h>
+#include <AsyncTimer.h>
 
 
 /****************************************************************************
@@ -73,65 +74,23 @@ using namespace Async;
 
 /****************************************************************************
  *
- * Defines & typedefs
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Local class definitions
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Prototypes
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
- * Exported Global Variables
- *
- ****************************************************************************/
-
-
-
-
-/****************************************************************************
- *
- * Local Global Variables
- *
- ****************************************************************************/
-
-
-
-/****************************************************************************
- *
  * Public member functions
  *
  ****************************************************************************/
 
 SquelchHidraw::SquelchHidraw(void)
-  : fd(-1), watch(0), active_low(false), pin(0)
+  : fd(-1), watch(0), reopen_timer(0), device(), rx_name(),
+    reopen_delay_ms(250), disconnected_logged(false),
+    active_low(false), pin(0)
 {
 } /* SquelchHidraw::SquelchHidraw */
 
 
 SquelchHidraw::~SquelchHidraw(void)
 {
-  delete watch;
-  if (fd >= 0)
-  {
-    close(fd);
-    fd = -1;
-  }
+  delete reopen_timer;
+  reopen_timer = 0;
+  closeDevice();
 } /* SquelchHidraw::~SquelchHidraw */
 
 
@@ -150,11 +109,12 @@ bool SquelchHidraw::initialize(Async::Config& cfg, const std::string& rx_name)
     return false;
   }
 
-  string devicename;
-  if (!cfg.getValue(rx_name, "HID_DEVICE", devicename))
+  this->rx_name = rx_name;
+
+  if (!cfg.getValue(rx_name, "HID_DEVICE", device) || device.empty())
   {
-    cerr << "*** ERROR: Config variable " << devicename <<
-            "/HID_DEVICE not set" << endl;
+    cerr << "*** ERROR: Config variable " << rx_name
+         << "/HID_DEVICE not set or invalid" << endl;
     return false;
   }
 
@@ -187,12 +147,12 @@ bool SquelchHidraw::initialize(Async::Config& cfg, const std::string& rx_name)
   }
   pin = (*it).second;
 
-  if ((fd = open(devicename.c_str(), O_RDWR, 0)) < 0)
+  if (!openDevice())
   {
-    cout << "*** ERROR: Could not open event device " << devicename
-         << " specified in " << rx_name << "/HID_DEVICE: "
-         << strerror(errno) << endl;
-    return false;
+    // Do not fail hard. USB devices may appear a bit later or after re-enum.
+    // We'll retry in the background.
+    scheduleReopen(reopen_delay_ms);
+    return true;
   }
 
   struct hidraw_devinfo hiddevinfo;
@@ -236,21 +196,13 @@ bool SquelchHidraw::initialize(Async::Config& cfg, const std::string& rx_name)
     return false;
   }
 
-  watch = new Async::FdWatch(fd, Async::FdWatch::FD_WATCH_RD);
-  assert(watch != 0);
-  watch->activity.connect(mem_fun(*this, &SquelchHidraw::hidrawActivity));
+  // Setup retry timer used for USB disconnect/reconnect recovery
+  reopen_timer = new Async::Timer(1000, Async::Timer::TYPE_ONESHOT);
+  reopen_timer->setEnable(false);
+  reopen_timer->expired.connect(mem_fun(*this, &SquelchHidraw::tryReopen));
 
   return true;
 }
-
-
-
-/****************************************************************************
- *
- * Protected member functions
- *
- ****************************************************************************/
-
 
 
 /****************************************************************************
@@ -261,21 +213,126 @@ bool SquelchHidraw::initialize(Async::Config& cfg, const std::string& rx_name)
 
 /**
  * @brief  Called when state of Hidraw port has been changed
- *
  */
 void SquelchHidraw::hidrawActivity(FdWatch *watch)
 {
+  (void)watch;
+
   char buf[5];
   int rd = read(fd, buf, sizeof(buf));
-  if (rd < 0)
+  if (rd <= 0)
   {
-    cerr << "*** ERROR: reading HID_DEVICE\n";
+    // Typical after USB disconnect: read() returns -1 with ENODEV/EIO, or 0.
+    if (!disconnected_logged)
+    {
+      if (rd == 0)
+      {
+        cerr << "*** ERROR: reading HID_DEVICE (" << device
+             << ") returned EOF -- will retry" << endl;
+      }
+      else
+      {
+        cerr << "*** ERROR: reading HID_DEVICE (" << device << ") failed: "
+             << strerror(errno) << " -- will retry" << endl;
+      }
+      disconnected_logged = true;
+    }
+
+    // Consider squelch closed while device is missing
+    setSignalDetected(false);
+
+    closeDevice();
+    scheduleReopen(reopen_delay_ms);
     return;
   }
 
   bool pin_high = buf[0] & pin;
   setSignalDetected(pin_high != active_low);
 } /* SquelchHidraw::hidrawActivity */
+
+
+void SquelchHidraw::closeDevice(void)
+{
+  if (watch != 0)
+  {
+    delete watch;
+    watch = 0;
+  }
+  if (fd >= 0)
+  {
+    close(fd);
+    fd = -1;
+  }
+}
+
+
+bool SquelchHidraw::openDevice(void)
+{
+  closeDevice();
+
+  fd = open(device.c_str(), O_RDWR, 0);
+  if (fd < 0)
+  {
+    return false;
+  }
+
+  // Verify chip (keep the existing behavior)
+  struct hidraw_devinfo hiddevinfo;
+  if ((ioctl(fd, HIDIOCGRAWINFO, &hiddevinfo) == -1) ||
+      (hiddevinfo.vendor != 0x0d8c))
+  {
+    closeDevice();
+    return false;
+  }
+
+  watch = new Async::FdWatch(fd, Async::FdWatch::FD_WATCH_RD);
+  assert(watch != 0);
+  watch->activity.connect(mem_fun(*this, &SquelchHidraw::hidrawActivity));
+
+  disconnected_logged = false;
+  reopen_delay_ms = 250;
+
+  return true;
+}
+
+
+void SquelchHidraw::scheduleReopen(unsigned delay_ms)
+{
+  if (reopen_timer == 0)
+  {
+    reopen_timer = new Async::Timer(1000, Async::Timer::TYPE_ONESHOT);
+    reopen_timer->setEnable(false);
+    reopen_timer->expired.connect(mem_fun(*this, &SquelchHidraw::tryReopen));
+  }
+
+  // Cap delay to avoid super long pauses
+  if (delay_ms < 100) delay_ms = 100;
+  if (delay_ms > 5000) delay_ms = 5000;
+
+  reopen_timer->setTimeout(delay_ms);
+  reopen_timer->setEnable(true);
+}
+
+
+void SquelchHidraw::tryReopen(Async::Timer *t)
+{
+  (void)t;
+
+  if (openDevice())
+  {
+    cout << "--- HID_DEVICE reconnected: " << device << endl;
+    return;
+  }
+
+  // Backoff
+  if (reopen_delay_ms < 5000)
+  {
+    reopen_delay_ms = (reopen_delay_ms < 1000)
+                        ? (reopen_delay_ms * 2)
+                        : (reopen_delay_ms + 1000);
+  }
+  scheduleReopen(reopen_delay_ms);
+}
 
 
 

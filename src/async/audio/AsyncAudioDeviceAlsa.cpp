@@ -427,6 +427,7 @@ void AudioDeviceAlsa::audioReadHandler(FdWatch *watch, unsigned short revents)
   if ((pcm_state < 0) || (pcm_state == SND_PCM_STATE_DISCONNECTED))
   {
     setDeviceError();
+    watch->setEnabled(false);   // avoid busy wakeups until reopen succeeds
     return;
   }
 
@@ -485,6 +486,7 @@ void AudioDeviceAlsa::writeSpaceAvailable(FdWatch *watch, unsigned short revents
   if ((pcm_state < 0) || (pcm_state == SND_PCM_STATE_DISCONNECTED))
   {
     setDeviceError();
+    watch->setEnabled(false);   // avoid busy wakeups until reopen succeeds
     return;
   }
 
