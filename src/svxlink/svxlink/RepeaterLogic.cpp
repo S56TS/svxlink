@@ -602,13 +602,25 @@ void RepeaterLogic::squelchOpen(bool is_open)
 {
   //cout << name() << ": The squelch is " << (is_open ? "OPEN" : "CLOSED")
   //     << endl;
-  
+
   rgr_enable = true;
-  
+
   if (is_open)
   {
     gettimeofday(&sql_up_timestamp, NULL);
   }
+
+  /*
+   * IMPORTANT:
+   * SimplexLogic always propagates squelch transitions to Logic::squelchOpen(),
+   * which dispatches the Tcl event "squelch_open <rx_id> <0|1>" via processEvent().
+   * RepeaterLogic historically only did this in some states (e.g. when repeater_is_up),
+   * so Tcl handlers were not invoked while the repeater was down.
+   *
+   * To make behavior consistent (and ensure AIORS LED hooks work), always notify
+   * Logic about squelch transitions.
+   */
+  Logic::squelchOpen(is_open);
 
   if (repeater_is_up)
   {
@@ -622,33 +634,33 @@ void RepeaterLogic::squelchOpen(bool is_open)
       gettimeofday(&now, NULL);
       timersub(&now, &sql_up_timestamp, &diff_tv);
       int diff_ms = diff_tv.tv_sec * 1000 + diff_tv.tv_usec / 1000;
-	
+
       if (sql_flap_sup_max_cnt > 0)
       {
-	if (diff_ms < sql_flap_sup_min_time)
-	{
-      	  if (++short_sql_open_cnt >= sql_flap_sup_max_cnt)
-	  {
-	    short_sql_open_cnt = 0;
-	    cout << name() << ": Interference detected: "
+        if (diff_ms < sql_flap_sup_min_time)
+        {
+          if (++short_sql_open_cnt >= sql_flap_sup_max_cnt)
+          {
+            short_sql_open_cnt = 0;
+            cout << name() << ": Interference detected: "
                  << sql_flap_sup_max_cnt << " squelch openings less than "
-		 << sql_flap_sup_min_time << "ms in length detected.\n";
-	    setUp(false, "SQL_FLAP_SUP");
-	  }
-	}
-	else
-	{
-      	  short_sql_open_cnt = 0;
-	}
+                 << sql_flap_sup_min_time << "ms in length detected.\n";
+            setUp(false, "SQL_FLAP_SUP");
+          }
+        }
+        else
+        {
+          short_sql_open_cnt = 0;
+        }
       }
-      
+
       if (ident_nag_timer.isEnabled() && (diff_ms > ident_nag_min_time))
       {
         ident_nag_timer.setEnable(false);
       }
     }
-  
-    Logic::squelchOpen(is_open);
+
+    // (Removed Logic::squelchOpen(is_open); -- now unconditional above)
   }
   else
   {
@@ -658,16 +670,16 @@ void RepeaterLogic::squelchOpen(bool is_open)
       {
         open_on_sql_timer.setEnable(true);
       }
-      
+
       if (open_on_sql_after_rpt_close > 0)
       {
-	struct timeval diff_tv;
-	timersub(&sql_up_timestamp, &rpt_close_timestamp, &diff_tv);
-	if (diff_tv.tv_sec < open_on_sql_after_rpt_close)
-	{
-	  open_reason = "SQL_RPT_REOPEN";
-	  activateOnOpenOrClose(SQL_FLANK_OPEN);
-	}
+        struct timeval diff_tv;
+        timersub(&sql_up_timestamp, &rpt_close_timestamp, &diff_tv);
+        if (diff_tv.tv_sec < open_on_sql_after_rpt_close)
+        {
+          open_reason = "SQL_RPT_REOPEN";
+          activateOnOpenOrClose(SQL_FLANK_OPEN);
+        }
       }
     }
     else
@@ -676,15 +688,16 @@ void RepeaterLogic::squelchOpen(bool is_open)
       open_on_ctcss_timer.setEnable(false);
       if (activate_on_sql_close)
       {
-      	activate_on_sql_close = false;
-      	setUp(true, open_reason);
+        activate_on_sql_close = false;
+        setUp(true, open_reason);
         //Logic::setReceivedTg(delayed_tg_activation);
-        Logic::squelchOpen(false);
+        // (Removed Logic::squelchOpen(false); -- now unconditional above)
       }
       delayed_tg_activation = TG_RESET;
     }
   }
 } /* RepeaterLogic::squelchOpen */
+
 
 
 void RepeaterLogic::detectedTone(float fq)

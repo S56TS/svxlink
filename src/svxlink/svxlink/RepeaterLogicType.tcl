@@ -130,6 +130,12 @@ proc identify_nag {} {
 }
 
 
+# ---- AIORS: re-hook after RepeaterLogicType (and Logic reload) ----
+if {[info commands ::AIORS::ensure_hooks] ne ""} {
+  catch { printInfo "AIORS: re-hook from local/RepeaterLogicType.tcl" }
+  catch { ::AIORS::ensure_hooks }
+}
+
 # end of namespace
 }
 
