@@ -62,6 +62,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <AsyncTimer.h>
 #include <Rx.h>
 #include <Tx.h>
+#include "SvxStats.h"
 #include <AsyncAudioPassthrough.h>
 #include <AsyncAudioMixer.h>
 #include <AsyncAudioAmp.h>
@@ -1074,6 +1075,8 @@ Logic::~Logic(void)
 void Logic::squelchOpen(bool is_open)
 {
   //std::cout << "### Logic::squelchOpen: is_open=" << is_open << std::endl;
+  SvxStats::instance().onSquelchState(is_open);
+  SvxStats::instance().onRfRxState(is_open);
 
   if (active_module != 0)
   {
@@ -1129,6 +1132,7 @@ bool Logic::getIdleState(void) const
 
 void Logic::transmitterStateChange(bool is_transmitting)
 {
+  SvxStats::instance().onRfTxState(is_transmitting);
   if (LocationInfo::has_instance() &&
       (LocationInfo::instance()->getTransmitting(name()) != is_transmitting))
   {

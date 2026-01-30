@@ -1,6 +1,6 @@
 # C++ source files needed to build SvxLink
 set(SVXLINK_SRCS
-  svxlink.cpp MsgHandler.cpp Module.cpp Logic.cpp EventHandler.cpp
+  svxlink.cpp MsgHandler.cpp Module.cpp Logic.cpp EventHandler.cpp SvxStats.cpp
   LinkManager.cpp CmdParser.cpp QsoRecorder.cpp DtmfDigitHandler.cpp
   )
 

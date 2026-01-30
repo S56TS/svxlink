@@ -1,0 +1,19 @@
+{
+  "files.watcherExclude": {
+    "**/build/**": true,
+    "**/.git/**": true,
+    "**/src/build/**": true
+  },
+  "files.exclude": {
+    "**/build/**": true,
+    "**/src/build/**": true
+  },
+  "search.exclude": {
+    "**/build/**": true,
+    "**/src/build/**": true,
+    "**/.git/**": true
+  },
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "C_Cpp.autocomplete": "disabled",
+  "C_Cpp.codeAnalysis.runAutomatically": false
+}

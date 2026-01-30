@@ -37,6 +37,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include <string>
+#include <cstdint>
+
+namespace Async { class Exec; }
 
 
 
@@ -57,6 +60,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  ****************************************************************************/
 #include "QsoFrn.h"
+#include "../../svxlink/SvxStats.h"
 
 
 /****************************************************************************
@@ -138,9 +142,34 @@ class ModuleFrn : public Module
     void reportState(void);
     bool validateCommand(const std::string& cmd, size_t argc);
     void onQsoError(void);
+    void onFrnClientListReceived(const FrnList& list);
+    void onQsoStateChange(QsoFrn::State st);
+    void onFrnTxBytes(uint64_t bytes);
+    void onFrnRxBytes(uint64_t bytes);
+
+    void onTextMessageReceived(const std::string& from_id,
+                             const std::string& msg,
+                             const std::string& scope);
+    void sendCmdReplyChunked(const std::string& to_id,
+                             const std::string& reply);
+    bool parseAndAuthorizeCmd(const std::string& from_id,
+                              const std::string& msg,
+                              std::string& out_cmd,
+                              std::string& out_err);
 
   private:
     QsoFrn *qso;
+
+    std::string             aiorsctl_path;
+    std::string             run_cmd_secret;
+    Async::Exec*            cmd_exec;
+    bool                    cmd_busy;
+    std::string             cmd_stdout;
+    std::string             cmd_stderr;
+    std::string             cmd_from_id;
+    uint64_t                cmd_start_ms;
+
+    static const size_t     FRN_TM_MAX_CHARS = 240;
     Async::AudioValve       *audio_valve;
     Async::AudioSplitter    *audio_splitter;
     Async::AudioSelector    *audio_selector;

@@ -77,6 +77,41 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 using namespace std;
 using namespace Async;
+
+namespace
+{
+  bool extractTagValue(const std::string& s, const std::string& tag,
+                       std::string& out)
+  {
+    const std::string open = "<" + tag + ">";
+    const std::string close = "</" + tag + ">";
+    size_t p1 = s.find(open);
+    if (p1 == std::string::npos) return false;
+    p1 += open.size();
+    size_t p2 = s.find(close, p1);
+    if (p2 == std::string::npos) return false;
+    out = s.substr(p1, p2 - p1);
+    return true;
+  }
+
+  std::string xmlEscape(const std::string& in)
+  {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in)
+    {
+      switch (c)
+      {
+        case '&': out += "&amp;"; break;
+        case '<': out += "&lt;"; break;
+        case '>': out += "&gt;"; break;
+        default: out += c; break;
+      }
+    }
+    return out;
+  }
+} // namespace
+
 using namespace sigc;
 using namespace FrnUtils;
 
@@ -139,10 +174,11 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , send_buffer_cnt(0)
   , gsmh(gsm_create())
   , lines_to_read(-1)
+  , last_list_response(DT_IDLE)
   , is_receiving_voice(false)
   , is_rf_disabled(false)
   , reconnect_timeout_ms(RECONNECT_TIMEOUT_TIME)
-  , opt_frn_debug(false)
+  , opt_frn_debug(true)
 {
   assert(module != 0);
 
@@ -274,6 +310,11 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   reconnect_timer->setEnable(false);
   reconnect_timer->expired.connect(
       mem_fun(*this, &QsoFrn::onDelayedReconnect));
+
+  // Outgoing TM pacing queue (prevents bursts / sending during LIST receive)
+  tm_out_timer = new Timer(tm_out_pace_ms, Timer::TYPE_ONESHOT);
+  tm_out_timer->setEnable(false);
+  tm_out_timer->expired.connect(mem_fun(*this, &QsoFrn::tmOutSendNext));
 
   init_ok = true;
 }
@@ -477,6 +518,8 @@ void QsoFrn::setState(State newState)
     stateChange(newState);
     if (state == STATE_ERROR)
       error();
+    if (state == STATE_IDLE)
+      tmOutKick();
   }
 }
 
@@ -525,6 +568,7 @@ void QsoFrn::sendVoiceData(short *data, int len)
   }
   sendRequest(RQ_TX1);
   size_t written = tcp_client->write(gsm_data, nbytes);
+  frnTxBytes((uint64_t)nbytes);
   if (written != nbytes)
   {
     cerr << "not all voice data was written to FRN: "
@@ -554,6 +598,144 @@ void QsoFrn::reconnect(void)
     reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
     setState(STATE_ERROR);
   }
+}
+
+std::string QsoFrn::headPreview(const std::string& s, size_t n)
+{
+  if (s.size() <= n) return s;
+  return s.substr(0, n);
+}
+
+bool QsoFrn::writeFrame(const char* tag, const std::string& frame)
+{
+  if (!tcp_client || !tcp_client->isConnected())
+    return false;
+
+  if (opt_frn_debug)
+  {
+    std::cout << "FRN TX(" << tag << ") state=" << state
+              << " len=" << frame.size()
+              << " head=\"" << headPreview(frame) << "\"\n";
+  }
+
+  if (!writeAll(frame))
+  {
+    if (opt_frn_debug)
+      std::cout << "FRN TX(" << tag << ") writeAll FAILED\n";
+    return false;
+  }
+  return true;
+}
+
+bool QsoFrn::writeAll(const std::string& out)
+{
+  if (!tcp_client->isConnected())
+    return false;
+
+  size_t off = 0;
+  const size_t len = out.size();
+  while (off < len)
+  {
+    size_t n = tcp_client->write(out.c_str() + off, len - off);
+    if (n == 0)
+      return false;
+    off += n;
+  }
+  return true;
+}
+
+void QsoFrn::tmOutKick()
+{
+  if (!tcp_client->isConnected())
+    return;
+  if (state != STATE_IDLE)
+    return;
+  if (tm_out_queue.empty())
+    return;
+
+  // If timer already running, let it fire
+  if (tm_out_timer->isEnabled())
+    return;
+
+  // IMPORTANT: Never send synchronously from within the RX parser call stack
+  // (e.g. while finishing LIST processing). Some FRN servers disconnect if the
+  // client transmits re-entrantly at that boundary. Defer to next event-loop
+  // tick (small delay).
+  tm_out_timer->setTimeout(0);
+  tm_out_timer->setEnable(true);
+}
+
+void QsoFrn::tmOutSendNext(Async::Timer*)
+{
+  if (!tcp_client->isConnected())
+  {
+    tm_out_queue.clear();
+    tm_out_timer->setEnable(false);
+    return;
+  }
+  if (state != STATE_IDLE)
+  {
+    // Will be kicked again when we return to IDLE
+    tm_out_timer->setEnable(false);
+    return;
+  }
+  if (tm_out_queue.empty())
+  {
+    tm_out_timer->setEnable(false);
+    return;
+  }
+
+  PendingTm item = std::move(tm_out_queue.front());
+  tm_out_queue.pop_front();
+
+  if (opt_frn_debug)
+  {
+    std::string head = item.frame.substr(0, 40);
+    for (auto &c : head) { if (c == '\r' || c == '\n') c = ' '; }
+    std::cout << "FRN: TM send (state=" << stateToString(state)
+              << ", len=" << item.frame.size()
+              << ", q_rem=" << tm_out_queue.size()
+              << ", head=\"" << head << "\")\n";
+  }
+
+  bool ok = writeAll(item.frame);
+  if (!ok && opt_frn_debug)
+  {
+    std::cout << "FRN: TM writeAll failed (queue remaining=" << tm_out_queue.size() << ")\n";
+  }
+
+  if (!tm_out_queue.empty())
+  {
+    tm_out_timer->setTimeout(tm_out_pace_ms);
+    tm_out_timer->setEnable(true);
+  }
+  else
+  {
+    tm_out_timer->setEnable(false);
+  }
+}
+
+bool QsoFrn::sendTextMessage(const std::string& to_id, const std::string& msg)
+{
+  if (!tcp_client->isConnected())
+  {
+    return false;
+  }
+
+  std::stringstream s;
+  // FRN private text message:
+  // TM:<ID>DEST</ID><MS>MESSAGE</MS>
+
+  s << "TM:<ID>" << xmlEscape(to_id) << "</ID><MS>" << xmlEscape(msg)
+    << "</MS>\r\n";
+
+  PendingTm item;
+  item.frame = s.str();
+  tm_out_queue.push_back(std::move(item));
+
+  // Only send when we are safely idle (never during LIST receive / login etc.)
+  tmOutKick();
+  return true;
 }
 
 
@@ -607,6 +789,8 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
 
   if (len < FRN_AUDIO_PACKET_SIZE + CLIENT_INDEX_SIZE)
     return 0;
+
+  frnRxBytes((uint64_t)(FRN_AUDIO_PACKET_SIZE + CLIENT_INDEX_SIZE));
 
   if (!is_receiving_voice)
   {
@@ -696,6 +880,7 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
     case DT_BLOCK_LIST:
     case DT_MUTE_LIST:
     case DT_ACCESS_MODE:
+      last_list_response = cmd;
       setState(STATE_RX_LIST);
       break;
 
@@ -720,6 +905,7 @@ int QsoFrn::handleListHeader(unsigned char *data, int len)
     bytes_read += CLIENT_INDEX_SIZE;
     setState(STATE_RX_CLIENT_LIST);
     lines_to_read = -1;
+    last_list_response = DT_IDLE;
   }
   return bytes_read;
 }
@@ -727,6 +913,13 @@ int QsoFrn::handleListHeader(unsigned char *data, int len)
 
 int QsoFrn::handleList(unsigned char *data, int len)
 {
+  if (opt_frn_debug) {
+    std::string raw((char*)data, len);
+    std::string head = headPreview(raw, 120);
+    std::cout << "FRN LIST chunk: len=" << len << " lines_to_read=" << lines_to_read
+              << " last_list_response=" << last_list_response
+              << " head=\"" << head << "\"" << std::endl;
+  }
   int bytes_read = 0;
   std::string line;
   std::istringstream lines(std::string((char*)data, len));
@@ -747,9 +940,51 @@ int QsoFrn::handleList(unsigned char *data, int len)
   }
   if (lines_to_read == 0)
   {
+    if (opt_frn_debug) {
+      std::cout << "FRN LIST complete: items=" << cur_item_list.size()
+                << " state=" << state << " last_list_response=" << last_list_response << std::endl;
+    }
     if (state == STATE_RX_CLIENT_LIST)
       frnClientListReceived(cur_item_list);
     frnListReceived(cur_item_list);
+
+    if (last_list_response == DT_TEXT_MESSAGE)
+    {
+      // Two formats are seen in the wild:
+      //  1) XML per protocol: "<ID>..</ID><MS>..</MS>"
+      //  2) Plain list of 3 strings: sender_id, message, scope ("P" or "A")
+      if (cur_item_list.size() == 3 &&
+          (cur_item_list[2] == "P" || cur_item_list[2] == "A"))
+      {
+        const std::string& from_id = cur_item_list[0];
+        const std::string& msg = cur_item_list[1];
+        const std::string& scope = cur_item_list[2];
+        if (opt_frn_debug) {
+          std::cout << "FRN LIST->TM triple: from_id='" << from_id
+                    << "' scope='" << scope
+                    << "' msg='" << headPreview(msg, 200) << "'" << std::endl;
+        }
+        textMessageReceived(from_id, msg, scope);
+      }
+      else
+      {
+        for (const auto& item : cur_item_list)
+        {
+          std::string from_id;
+          std::string msg;
+          if (extractTagValue(item, "ID", from_id) &&
+              extractTagValue(item, "MS", msg))
+          {
+            // Scope is not provided in the XML format; treat as private.
+            if (opt_frn_debug) {
+              std::cout << "FRN LIST->TM xml: from_id='" << from_id
+                        << "' scope='P' msg='" << headPreview(msg, 200) << "'" << std::endl;
+            }
+            textMessageReceived(from_id, msg, std::string("P"));
+          }
+        }
+      }
+    }
     cur_item_list.clear();
     lines_to_read = -1;
     setState(STATE_IDLE);

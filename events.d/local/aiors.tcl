@@ -11,6 +11,9 @@ namespace eval ::AIORS {
   variable debug 0
   variable cfg_logged 0
 
+
+  # One-shot suppression flag: suppress automatic post-IDENT status report (keeps DTMF-requested reports)
+  variable suppress_status_once 0
   # Courtesy beep behavior (optional)
   variable startup_suppress_ms 3000
   variable beep_debounce_ms 800
@@ -409,13 +412,20 @@ proc ::AIORS::_install_beep_override {} {
       } $p $p $p $p]
     } else {
       set body [format {# AIORS wrapper around %s
-        if {![info exists ::AIORS::disable_rpt_close_beep] || !$::AIORS::disable_rpt_close_beep} {
-          return [uplevel 1 [linsert $args 0 %s__aiors_orig]]
-        }
-
         set key ""
         if {[llength $args] >= 1} {
           set key [lindex $args 0]
+        }
+
+        # Arm one-shot suppression for the automatic "Active Module ..." report after IDENT.
+        # This keeps DTMF-requested status reports working.
+        if {[regexp -nocase {(^|_)(ident|id)($|_)} $key] || [regexp -nocase {IDENT} $key]} {
+          set ::AIORS::suppress_status_once 1
+        }
+
+        # If we're not suppressing beeps, just pass through (but keep IDENT arming above).
+        if {![info exists ::AIORS::disable_rpt_close_beep] || !$::AIORS::disable_rpt_close_beep} {
+          return [uplevel 1 [linsert $args 0 %s__aiors_orig]]
         }
 
         if {[regexp -nocase {(^|_)(rgr|roger|close|courtesy)(_|$)} $key] ||
@@ -439,6 +449,48 @@ proc ::AIORS::_install_beep_override {} {
   }
 
   return 0
+}
+
+
+# ---- Suppress automatic post-IDENT "Active Module ..." announcement (keeps DTMF status working) ----
+proc ::AIORS::_install_status_report_suppress {} {
+  variable inst_ns
+  if {$inst_ns eq ""} { return 0 }
+
+  set p "${inst_ns}::status_report"
+  if {[info commands $p] eq ""} { return 0 }
+
+  # Already wrapped?
+  if {[info commands "${p}__aiors_orig"] ne ""} { return 1 }
+
+  if {[catch {rename $p ${p}__aiors_orig} e]} {
+    ::AIORS::_warn "AIORS: status_report rename failed for $p: $e"
+    return 0
+  }
+
+  proc $p {} {
+    global active_module
+
+    # One-shot suppression: only right after IDENT playback.
+    if {[info exists ::AIORS::suppress_status_once] && $::AIORS::suppress_status_once} {
+      # Clear the flag no matter what so it can't stick forever.
+      set ::AIORS::suppress_status_once 0
+
+      # Suppress only when FRN is the active module.
+      if {[info exists active_module] && [regexp -nocase {frn|ModuleFrn} $active_module]} {
+        if {[info exists ::AIORS::debug] && $::AIORS::debug} {
+          catch {::AIORS::_log "AIORS: suppressed automatic status_report (active_module='$active_module')"}
+        }
+        return
+      }
+    }
+
+    # Default: call original
+    return [uplevel 1 [list ${p}__aiors_orig]]
+  }
+
+  ::AIORS::_log "AIORS: installed status_report one-shot suppress via $p"
+  return 1
 }
 
 
@@ -503,6 +555,8 @@ proc ::AIORS::ensure_hooks {} {
   ::AIORS::_try_install_rx_hook
   ::AIORS::_schedule_rx_rehook
 
+
+  ::AIORS::_install_status_report_suppress
   if {$::AIORS::disable_rpt_close_beep} {
     ::AIORS::_install_beep_override
   }

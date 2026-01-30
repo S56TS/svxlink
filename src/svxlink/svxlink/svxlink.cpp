@@ -73,6 +73,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include "version/SVXLINK.h"
 #include "Logic.h"
 #include "LinkManager.h"
+#include "SvxStats.h"
 
 
 /****************************************************************************
@@ -444,6 +445,23 @@ int main(int argc, char **argv)
   }
 
   initialize_logics(cfg);
+
+  // Start periodic statistics logging (configurable)
+  unsigned stats_int_s = 60;
+  std::string stats_int_str;
+  if (cfg.getValue("GLOBAL", "STATS_INTERVAL", stats_int_str))
+  {
+    stats_int_s = (unsigned)atoi(stats_int_str.c_str());
+    if (stats_int_s == 0) stats_int_s = 60;
+  }
+
+  std::string stats_persist_path = "/var/lib/svxlink/svxstats_totals.txt";
+  cfg.getValue("GLOBAL", "STATS_PERSIST_PATH", stats_persist_path);
+
+  SvxStats::instance().setPersistPath(stats_persist_path);
+  SvxStats::instance().loadPersistedTotals();
+  SvxStats::instance().start(stats_int_s);
+
 
   if (LinkManager::hasInstance())
   {

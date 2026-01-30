@@ -38,6 +38,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 #include <string>
 #include <vector>
+#include <deque>
 #include <sigc++/sigc++.h>
 
 
@@ -201,6 +202,15 @@ class QsoFrn
      */
     void disconnect(void);
 
+
+    /**
+     * @brief Send a private text message to another FRN client (TM message)
+     * @param to_id  Destination client ID as used by FRN
+     * @param msg    Message text
+     * @return true if the message was queued for sending
+     */
+    bool sendTextMessage(const std::string& to_id, const std::string& msg);
+
     /**
      * @brief Called by FRN module to notify that squelch is opened
      *
@@ -285,7 +295,16 @@ class QsoFrn
       */
      sigc::signal<void(State)> stateChange;
 
- protected:
+
+     /**
+      * @brief A private text message was received
+      * @param from_id Sender client ID
+      * @param msg     Message text
+      * @param scope   Scope flag ("P" private, "A" broadcast)
+      */
+     sigc::signal<void(const std::string&, const std::string&, const std::string&)> textMessageReceived;
+
+public:
      /**
       * @brief The registered sink has flushed all samples
       *
@@ -334,6 +353,16 @@ class QsoFrn
      * @param string with client xml data
      */
     sigc::signal<void(const std::string&)> rxVoiceStarted;
+
+    /**
+     * @brief Emitted when a chunk of voice payload has been sent to FRN
+     */
+    sigc::signal<void(uint64_t)> frnTxBytes;
+
+    /**
+     * @brief Emitted when a chunk of voice payload has been received from FRN
+     */
+    sigc::signal<void(uint64_t)> frnRxBytes;
 
      /**
      * @brief Called when started receiving voice from the client
@@ -544,6 +573,23 @@ class QsoFrn
     Async::Timer *      rx_timeout_timer;
     Async::Timer *      con_timeout_timer;
     Async::Timer *      keepalive_timer;
+    struct PendingTm
+    {
+      std::string frame;  // fully formatted "TM:...\r\n"
+    };
+
+    std::deque<PendingTm> tm_out_queue;
+    Async::Timer*         tm_out_timer = nullptr;
+    int                   tm_out_pace_ms = 250;
+    int                   tm_out_initial_delay_ms = 0; // defer send until next event-loop tick
+
+    void tmOutKick();
+    void tmOutSendNext(Async::Timer* t);
+    bool writeAll(const std::string& out);
+
+    bool writeFrame(const char* tag, const std::string& frame);
+    static std::string headPreview(const std::string& s, size_t n = 40);
+
     Async::Timer *      reconnect_timer;
     State               state;
     int                 connect_retry_cnt;
@@ -552,6 +598,7 @@ class QsoFrn
     int                 send_buffer_cnt;
     gsm                 gsmh;
     int                 lines_to_read;
+    Response            last_list_response;
     FrnList             cur_item_list;
     FrnList             client_list;
     bool                is_receiving_voice;

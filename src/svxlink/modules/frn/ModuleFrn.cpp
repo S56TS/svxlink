@@ -33,6 +33,11 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <stdio.h>
 #include <iostream>
 #include <sstream>
+#include <chrono>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <AsyncExec.h>
 
 
 /****************************************************************************
@@ -58,6 +63,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <version/MODULE_FRN.h>
 #include "ModuleFrn.h"
 #include "multirate_filter_coeff.h"
+#include "../../svxlink/SvxStats.h"
 
 
 /****************************************************************************
@@ -129,6 +135,11 @@ ModuleFrn::ModuleFrn(void *dl_handle, Logic *logic, const string& cfg_name)
   , audio_valve(0)
   , audio_splitter(0)
   , audio_selector(0)
+  , audio_fifo(0)
+  , aiorsctl_path("/usr/local/bin/aiorsctl")
+  , run_cmd_secret("")
+  , cmd_exec(0)
+  , cmd_busy(false)
 {
   cout << "\tModule Frn v" MODULE_FRN_VERSION " starting...\n";
 
@@ -193,6 +204,30 @@ bool ModuleFrn::initialize(void)
   qso = new QsoFrn(this);
   qso->error.connect(
       mem_fun(*this, &ModuleFrn::onQsoError));
+  qso->frnClientListReceived.connect(
+      mem_fun(*this, &ModuleFrn::onFrnClientListReceived));
+  qso->stateChange.connect(
+      mem_fun(*this, &ModuleFrn::onQsoStateChange));
+  qso->frnTxBytes.connect(
+      mem_fun(*this, &ModuleFrn::onFrnTxBytes));
+  qso->frnRxBytes.connect(
+      mem_fun(*this, &ModuleFrn::onFrnRxBytes));
+
+  // --- RunCmd -> aiorsctl bridge configuration ---
+  std::string v;
+  if (cfg().getValue(cfgName(), "AIORSCTL_PATH", v) && !v.empty())
+  {
+    aiorsctl_path = v;
+  }
+  v.clear();
+  if (cfg().getValue(cfgName(), "RUN_CMD_SECRET", v))
+  {
+    run_cmd_secret = v;
+  }
+
+  qso->textMessageReceived.connect(
+      mem_fun(*this, &ModuleFrn::onTextMessageReceived));
+
 
   // rig/mic -> frn
   audio_valve = new AudioValve;
@@ -485,6 +520,332 @@ void ModuleFrn::onQsoError(void)
   deactivateMe();
 }
 
-/*
- * This file has not been truncated
- */
+
+
+void ModuleFrn::onFrnClientListReceived(const FrnList& list)
+{
+  // Treat each list entry as an opaque user identifier/descriptor.
+  // The FRN server/client implementations vary; we only need stable uniqueness.
+  std::vector<std::string> v;
+  v.reserve(list.size());
+  for (const auto& s : list) v.push_back(s);
+  SvxStats::instance().onFrnClientListUpdate(v);
+}
+
+void ModuleFrn::onQsoStateChange(QsoFrn::State st)
+{
+  // FRN TX is active in any of the TX audio states.
+  const bool is_tx = (st == QsoFrn::STATE_TX_AUDIO ||
+                      st == QsoFrn::STATE_TX_AUDIO_APPROVED ||
+                      st == QsoFrn::STATE_TX_AUDIO_WAITING);
+  const bool is_rx = (st == QsoFrn::STATE_RX_AUDIO);
+
+  SvxStats::instance().onFrnTxState(is_tx);
+  SvxStats::instance().onFrnRxState(is_rx);
+}
+
+void ModuleFrn::onFrnTxBytes(uint64_t bytes)
+{
+  SvxStats::instance().addFrnTxBytes(bytes);
+}
+
+void ModuleFrn::onFrnRxBytes(uint64_t bytes)
+{
+  SvxStats::instance().addFrnRxBytes(bytes);
+}
+
+static inline std::string trim_copy(const std::string& s)
+{
+  const char* ws = " \t\r\n";
+  size_t b = s.find_first_not_of(ws);
+  if (b == std::string::npos) return "";
+  size_t e = s.find_last_not_of(ws);
+  return s.substr(b, e - b + 1);
+}
+
+static inline std::string tolower_copy(const std::string& s)
+{
+  std::string out = s;
+  std::transform(out.begin(), out.end(), out.begin(),
+                 [](unsigned char c){ return std::tolower(c); });
+  return out;
+}
+
+bool ModuleFrn::parseAndAuthorizeCmd(const std::string& from_id,
+                                     const std::string& msg,
+                                     std::string& out_cmd,
+                                     std::string& out_err)
+{
+  (void)from_id;
+  std::string m = trim_copy(msg);
+  std::string m_l = tolower_copy(m);
+
+  const std::string prefix = "runcmd:";
+  if (m_l.rfind(prefix, 0) != 0)
+  {
+    return false; // Not a RunCmd message
+  }
+
+  std::string rest = trim_copy(m.substr(prefix.size()));
+
+  // Optional auth: RunCmd:<SECRET>: <cmd>  OR  RunCmd:<SECRET> <cmd>
+  if (!run_cmd_secret.empty())
+  {
+    if (rest.rfind(run_cmd_secret + ":", 0) == 0)
+    {
+      rest = trim_copy(rest.substr(run_cmd_secret.size() + 1));
+    }
+    else if (rest.rfind(run_cmd_secret + " ", 0) == 0)
+    {
+      rest = trim_copy(rest.substr(run_cmd_secret.size() + 1));
+    }
+    else
+    {
+      out_err = "CmdReply: ERR: auth failed";
+      return true; // It WAS RunCmd, but unauthorized
+    }
+  }
+
+  rest = tolower_copy(trim_copy(rest));
+  if (rest.empty())
+  {
+    out_err = "CmdReply: ERR: empty command";
+    return true;
+  }
+
+  // Allowlist
+  std::istringstream iss(rest);
+  std::vector<std::string> tok;
+  std::string t;
+  while (iss >> t) tok.push_back(t);
+
+  bool allowed = false;
+  if (tok.size() == 3 && tok[0] == "get" && tok[1] == "psu" &&
+      (tok[2] == "a" || tok[2] == "b" || tok[2] == "all"))
+  {
+    allowed = true;
+  }
+  else if (tok.size() == 3 && tok[0] == "get" && tok[1] == "temp" &&
+           tok[2] == "all")
+  {
+    allowed = true;
+  }
+  else if (tok.size() == 2 && tok[0] == "get" && tok[1] == "stats")
+  {
+    allowed = true;
+  }
+
+  if (!allowed)
+  {
+    out_err = "CmdReply: ERR: command not allowed";
+    return true;
+  }
+
+  out_cmd = rest;
+  return true;
+}
+
+void ModuleFrn::sendCmdReplyChunked(const std::string& to_id,
+                                    const std::string& reply)
+{
+  // Sanitize: remove CR/LF and other control chars (keep tab)
+  std::string s = reply;
+  s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+  s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+  s.erase(std::remove_if(s.begin(), s.end(),
+                         [](unsigned char c){
+                           return (c < 0x20 && c != '\t') || c == 0x7F;
+                         }),
+          s.end());
+
+  const std::string base_prefix = "CmdReply: ";
+  const std::string part_prefix_example = "CmdReply: [99/99] ";
+  const size_t reserve = part_prefix_example.size();
+
+  // If it fits in one TM, keep it simple (no numbering)
+  if (base_prefix.size() + s.size() <= FRN_TM_MAX_CHARS)
+  {
+    qso->sendTextMessage(to_id, base_prefix + s);
+    return;
+  }
+
+  // Chunked + numbered: CmdReply: [i/N] ...
+  const size_t payload_max = FRN_TM_MAX_CHARS;
+  const size_t chunk_size = (payload_max > reserve) ? (payload_max - reserve) : 50;
+
+  std::vector<std::string> chunks;
+  chunks.reserve((s.size() / chunk_size) + 1);
+
+  for (size_t off = 0; off < s.size(); )
+  {
+    size_t take = std::min(chunk_size, s.size() - off);
+
+    // Try to break on a space for readability
+    if (off + take < s.size())
+    {
+      size_t last_space = s.rfind(' ', off + take);
+      if (last_space != std::string::npos && last_space > off + 20)
+        take = last_space - off;
+    }
+
+    chunks.push_back(s.substr(off, take));
+    off += take;
+    while (off < s.size() && s[off] == ' ') off++;
+  }
+
+  const size_t total = chunks.size();
+  for (size_t i = 0; i < total; ++i)
+  {
+    std::ostringstream pfx;
+    pfx << "CmdReply: [" << (i+1) << "/" << total << "] ";
+    qso->sendTextMessage(to_id, pfx.str() + chunks[i]);
+  }
+}
+
+
+
+void ModuleFrn::onTextMessageReceived(const std::string& from_id,
+                                     const std::string& msg,
+                                     const std::string& scope)
+{
+  std::string cmd;
+  std::string err;
+
+  bool is_runcmd = parseAndAuthorizeCmd(from_id, msg, cmd, err);
+  if (!is_runcmd)
+  {
+    return; // ignore non-RunCmd messages
+  }
+
+  // Only accept private/direct messages. If someone tries RunCmd via broadcast,
+  // log it once but do not execute and do not reply.
+  if (scope != "P")
+  {
+    std::string m = trim_copy(msg);
+    std::cout << "FRN RunCmd IGNORED (broadcast) from " << from_id
+              << ": " << m << std::endl;
+    SvxStats::instance().onCmdBroadcastAttempt();
+    return;
+  }
+
+  if (!err.empty() && cmd.empty())
+  {
+    // RunCmd but rejected/unauthorized/invalid (no executable cmd)
+    std::cout << "FRN RunCmd REJECTED from " << from_id << ": (" << err << ")"
+              << std::endl;
+    if (err.find("AUTH") != std::string::npos) SvxStats::instance().onCmdAuthFailed();
+    else SvxStats::instance().onCmdRejected();
+    // err already includes "CmdReply: ..." prefix for user-visible error
+    qso->sendTextMessage(from_id, err);
+    return;
+  }
+
+  // From here on, we have a validated command string in 'cmd'
+
+  // Internal command (no aiorsctl): get stats
+// NOTE: Keep this as a SINGLE FRN TM packet (no burst / chunking) because
+// some FRN servers/clients will drop the TCP connection if we emit multiple
+// <TM> packets back-to-back.
+if (cmd == "get stats")
+{
+  SvxStats::instance().onCmdAccepted();
+
+  std::vector<std::string> groups = SvxStats::instance().formatStatsGroups();
+  if (groups.empty())
+    groups.push_back("STATS (empty)");
+
+  // Numbered replies: CmdReply: [i/N] ...
+  const size_t n = groups.size();
+  const std::string base_prefix = "CmdReply: ";
+  for (size_t i = 0; i < n; ++i)
+  {
+    std::ostringstream pfx;
+    pfx << base_prefix << "[" << (i+1) << "/" << n << "] ";
+
+    std::string line = groups[i];
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+    line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
+
+    // Hard clamp to FRN_TM_MAX_CHARS
+    if (pfx.str().size() < FRN_TM_MAX_CHARS)
+    {
+      const size_t max_payload = FRN_TM_MAX_CHARS - pfx.str().size();
+      if (line.size() > max_payload && max_payload >= 3)
+      {
+        line.resize(max_payload - 3);
+        line += "...";
+      }
+      else if (line.size() > max_payload)
+      {
+        line.resize(max_payload);
+      }
+    }
+    else
+    {
+      line.clear();
+    }
+
+    qso->sendTextMessage(from_id, pfx.str() + line);
+  }
+  return;
+}
+
+  if (cmd_busy)
+  {
+    std::cout << "FRN RunCmd BUSY from " << from_id << ": " << cmd << std::endl;
+    SvxStats::instance().onCmdRejected();
+    qso->sendTextMessage(from_id, "CmdReply: ERR: busy");
+    return;
+  }
+
+  cmd_busy = true;
+  cmd_from_id = from_id;
+  cmd_stdout.clear();
+  cmd_stderr.clear();
+
+  std::cout << "FRN RunCmd ACCEPTED from " << from_id << ": " << cmd << std::endl;
+  SvxStats::instance().onCmdAccepted();
+  cmd_start_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+
+  std::string cmdline = aiorsctl_path + " " + cmd;
+  cmd_exec = new Async::Exec(cmdline);
+  cmd_exec->setTimeout(3); // seconds
+
+  cmd_exec->stdoutData.connect(
+      [this](const char* buf, int cnt)
+      {
+        cmd_stdout.append(buf, cnt);
+      });
+
+  cmd_exec->stderrData.connect(
+      [this](const char* buf, int cnt)
+      {
+        cmd_stderr.append(buf, cnt);
+      });
+
+  cmd_exec->exited.connect(
+      [this](void)
+      {
+        std::string out = trim_copy(cmd_stdout);
+        std::string errout = trim_copy(cmd_stderr);
+        std::string reply = out.empty() ? errout : out;
+        if (reply.empty())
+        {
+          reply = "OK";
+        }
+
+        sendCmdReplyChunked(cmd_from_id, reply);
+        uint64_t end_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (end_ms >= cmd_start_ms)
+          SvxStats::instance().onCmdExecTimeMs((uint32_t)(end_ms - cmd_start_ms));
+
+        delete cmd_exec;
+        cmd_exec = 0;
+        cmd_busy = false;
+      });
+
+  cmd_exec->run();
+}
+
