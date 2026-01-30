@@ -132,6 +132,7 @@ extern "C" {
 ModuleFrn::ModuleFrn(void *dl_handle, Logic *logic, const string& cfg_name)
   : Module(dl_handle, logic, cfg_name)
   , qso(0)
+  , last_qso_state(QsoFrn::STATE_DISCONNECTED)
   , audio_valve(0)
   , audio_splitter(0)
   , audio_selector(0)
@@ -534,6 +535,19 @@ void ModuleFrn::onFrnClientListReceived(const FrnList& list)
 
 void ModuleFrn::onQsoStateChange(QsoFrn::State st)
 {
+  // FRN link state: consider "up" when the protocol has reached IDLE or beyond.
+  const bool link_up = (st >= QsoFrn::STATE_IDLE);
+  const bool prev_link_up = (last_qso_state >= QsoFrn::STATE_IDLE);
+  if (link_up && !prev_link_up)
+  {
+    SvxStats::instance().onFrnLinkUp();
+  }
+  else if (!link_up && prev_link_up)
+  {
+    SvxStats::instance().onFrnLinkDown();
+  }
+  last_qso_state = st;
+
   // FRN TX is active in any of the TX audio states.
   const bool is_tx = (st == QsoFrn::STATE_TX_AUDIO ||
                       st == QsoFrn::STATE_TX_AUDIO_APPROVED ||

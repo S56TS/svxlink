@@ -159,6 +159,7 @@ class ModuleFrn : public Module
 
   private:
     QsoFrn *qso;
+    QsoFrn::State           last_qso_state;
 
     std::string             aiorsctl_path;
     std::string             run_cmd_secret;

@@ -50,6 +50,9 @@ public:
   void onFrnRxState(bool is_rx);
   void addFrnTxBytes(uint64_t bytes);
   void addFrnRxBytes(uint64_t bytes);
+  // Link/connectivity (FRN TCP session up/down)
+  void onFrnLinkUp();
+  void onFrnLinkDown();
 
   // --- RF/repeater side ---
   void onSquelchState(bool is_open);
@@ -89,6 +92,8 @@ private:
     CmdAgg cmd;
     uint64_t frn_tx_bytes = 0;
     uint64_t frn_rx_bytes = 0;
+    uint64_t frn_link_up = 0;
+    uint64_t frn_link_down = 0;
     uint64_t user_join = 0;
     uint64_t user_leave = 0;
   };
@@ -120,6 +125,8 @@ private:
   DurAgg sql_total;
   uint64_t frn_tx_bytes_total = 0;
   uint64_t frn_rx_bytes_total = 0;
+  uint64_t frn_link_up_total = 0;
+  uint64_t frn_link_down_total = 0;
   CmdAgg cmd_total;
 
   // FRN users
@@ -133,6 +140,12 @@ private:
   uint32_t stats_interval_ms = 60000;
   std::string persist_path;
   bool started = false;
+
+  // FRN activity timestamps (monotonic seconds). 0 means "unknown".
+  double last_frn_rx_monotonic = 0.0;
+  double last_frn_tx_monotonic = 0.0;
+  double last_frn_link_up_monotonic = 0.0;
+  double last_frn_link_down_monotonic = 0.0;
 
   // time base
   double start_monotonic = 0.0;

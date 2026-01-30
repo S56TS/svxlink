@@ -55,9 +55,10 @@ void SvxStats::start(uint32_t interval_s)
   started = true;
 
   stats_interval_ms = (interval_s == 0 ? 60000U : (uint32_t)(interval_s * 1000U));
-  tick_timer = new Async::Timer(stats_interval_ms);
-  tick_timer->setEnable(true);
+  // NOTE: Async::Timer defaults to TYPE_ONESHOT. We want periodic stats.
+  tick_timer = new Async::Timer(stats_interval_ms, Async::Timer::TYPE_PERIODIC, false);
   tick_timer->expired.connect(sigc::mem_fun(*this, &SvxStats::onTick));
+  tick_timer->setEnable(true);
 }
 
 
@@ -103,6 +104,8 @@ void SvxStats::onFrnClientListUpdate(const std::vector<std::string>& client_list
 {
   uint64_t m = minute_now();
   rotateBuckets(m);
+  // Client list updates are received from the FRN server, so treat this as RX activity.
+  last_frn_rx_monotonic = mono_now_sec();
 
   // Build new presence set
   std::unordered_map<std::string, bool> new_present;
@@ -134,6 +137,24 @@ void SvxStats::onFrnClientListUpdate(const std::vector<std::string>& client_list
 
   // Peak tracking over last hour: compute fresh on tick (cheap) but also update quickly
   // We'll just update with current and let onTick compute accurate peak.
+}
+
+void SvxStats::onFrnLinkUp()
+{
+  uint64_t m = minute_now();
+  rotateBuckets(m);
+  buckets[idx].frn_link_up += 1;
+  frn_link_up_total += 1;
+  last_frn_link_up_monotonic = mono_now_sec();
+}
+
+void SvxStats::onFrnLinkDown()
+{
+  uint64_t m = minute_now();
+  rotateBuckets(m);
+  buckets[idx].frn_link_down += 1;
+  frn_link_down_total += 1;
+  last_frn_link_down_monotonic = mono_now_sec();
 }
 
 void SvxStats::onFrnTxState(bool is_tx)
@@ -180,6 +201,7 @@ void SvxStats::addFrnTxBytes(uint64_t bytes)
 {
   uint64_t m = minute_now();
   rotateBuckets(m);
+  last_frn_tx_monotonic = mono_now_sec();
   buckets[idx].frn_tx_bytes += bytes;
   frn_tx_bytes_total += bytes;
 }
@@ -188,6 +210,7 @@ void SvxStats::addFrnRxBytes(uint64_t bytes)
 {
   uint64_t m = minute_now();
   rotateBuckets(m);
+  last_frn_rx_monotonic = mono_now_sec();
   buckets[idx].frn_rx_bytes += bytes;
   frn_rx_bytes_total += bytes;
 }
@@ -320,17 +343,12 @@ std::string SvxStats::formatStatsLine()
   double now_s = mono_now_sec();
 
   // Aggregate last hour (60 buckets)
-  DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h, sql_1h;
+  DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h;
   CmdAgg cmd_1h;
   uint64_t frn_tx_bytes_1h = 0, frn_rx_bytes_1h = 0;
   uint64_t join_1h = 0, leave_1h = 0;
+  uint64_t link_up_1h = 0, link_down_1h = 0;
 
-  // Compute peak users in last hour as max of sampled current size at updates is not stored.
-  // We'll approximate by taking max current users seen via client list updates in window.
-  // Since we don't store historical "users_cur", we compute peak as max of current within hour updates
-  // by scanning user_last_seen_minute map size per minute is expensive, so we instead track
-  // peak by updating onTick.
-  (void)join_1h;
 
   for (size_t i = 0; i < NBUCKET; ++i)
   {
@@ -341,10 +359,11 @@ std::string SvxStats::formatStatsLine()
     duragg_merge(frn_rx_1h, b.frn_rx);
     duragg_merge(rf_tx_1h, b.rf_tx);
     duragg_merge(rf_rx_1h, b.rf_rx);
-    duragg_merge(sql_1h, b.sql);
     cmdagg_merge(cmd_1h, b.cmd);
     frn_tx_bytes_1h += b.frn_tx_bytes;
     frn_rx_bytes_1h += b.frn_rx_bytes;
+    link_up_1h += b.frn_link_up;
+    link_down_1h += b.frn_link_down;
     join_1h += b.user_join;
     leave_1h += b.user_leave;
   }
@@ -361,13 +380,11 @@ std::string SvxStats::formatStatsLine()
   DurAgg frn_rx_total_eff = frn_rx_total;
   DurAgg rf_tx_total_eff  = rf_tx_total;
   DurAgg rf_rx_total_eff  = rf_rx_total;
-  DurAgg sql_total_eff    = sql_total;
 
   add_active(frn_tx_active, frn_tx_t0, frn_tx_1h, frn_tx_total_eff);
   add_active(frn_rx_active, frn_rx_t0, frn_rx_1h, frn_rx_total_eff);
   add_active(rf_tx_active,  rf_tx_t0,  rf_tx_1h,  rf_tx_total_eff);
   add_active(rf_rx_active,  rf_rx_t0,  rf_rx_1h,  rf_rx_total_eff);
-  add_active(sql_active,    sql_t0,    sql_1h,    sql_total_eff);
 
   // unique users in last hour
   uint64_t unique_1h = 0;
@@ -387,13 +404,27 @@ std::string SvxStats::formatStatsLine()
   // Derived duty cycles
   auto pct = [](double sec) -> double { return std::min(100.0, std::max(0.0, sec * 100.0 / 3600.0)); };
 
+  // FRN link/activity ages (seconds since last event; -1 if unknown)
+  auto age_s = [&](double last) -> int64_t {
+    if (last <= 0.0) return -1;
+    return (int64_t)std::llround(std::max(0.0, now_s - last));
+  };
+  const int64_t frn_rx_age_s = age_s(last_frn_rx_monotonic);
+  const int64_t frn_tx_age_s = age_s(last_frn_tx_monotonic);
+
   std::ostringstream os;
   os.setf(std::ios::fixed);
   os << "STATS"
      << " uptime_s=" << uptimeSeconds()
+     << " frn_link_up_evt_1h=" << link_up_1h
+     << " frn_link_down_evt_1h=" << link_down_1h
+     << " frn_rx_age_s=" << frn_rx_age_s
+     << " frn_tx_age_s=" << frn_tx_age_s
      << " frn_users=" << frn_users_cur
      << " frn_users_peak_1h=" << peak_1h
      << " frn_users_unique_1h=" << unique_1h
+     << " frn_link_up_1h=" << link_up_1h
+     << " frn_link_down_1h=" << link_down_1h
      << " frn_user_join_1h=" << join_1h
      << " frn_user_leave_1h=" << leave_1h
 
@@ -409,11 +440,6 @@ std::string SvxStats::formatStatsLine()
      << " frn_rx_min_s_1h=" << (frn_rx_1h.min_sec > 0.0 ? frn_rx_1h.min_sec : 0.0)
      << " frn_rx_max_s_1h=" << frn_rx_1h.max_sec
      << " frn_rx_bytes_1h=" << frn_rx_bytes_1h
-
-     << " sq_evt_1h=" << sql_1h.evt
-     << " sq_open_s_1h=" << (uint64_t)std::llround(sql_1h.sec)
-     << " sq_min_s_1h=" << (sql_1h.min_sec > 0.0 ? sql_1h.min_sec : 0.0)
-     << " sq_max_s_1h=" << sql_1h.max_sec
 
      << " rf_tx_evt_1h=" << rf_tx_1h.evt
      << " rf_tx_s_1h=" << (uint64_t)std::llround(rf_tx_1h.sec)
@@ -447,10 +473,11 @@ std::vector<std::string> SvxStats::formatStatsGroups()
   rotateBuckets(now_m);
   double now_s = mono_now_sec();
 
-  DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h, sql_1h;
+  DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h;
   CmdAgg cmd_1h;
   uint64_t frn_tx_bytes_1h = 0, frn_rx_bytes_1h = 0;
   uint64_t join_1h = 0, leave_1h = 0;
+  uint64_t link_up_1h = 0, link_down_1h = 0;
 
   for (size_t i = 0; i < NBUCKET; ++i)
   {
@@ -460,10 +487,11 @@ std::vector<std::string> SvxStats::formatStatsGroups()
     duragg_merge(frn_rx_1h, b.frn_rx);
     duragg_merge(rf_tx_1h, b.rf_tx);
     duragg_merge(rf_rx_1h, b.rf_rx);
-    duragg_merge(sql_1h, b.sql);
     cmdagg_merge(cmd_1h, b.cmd);
     frn_tx_bytes_1h += b.frn_tx_bytes;
     frn_rx_bytes_1h += b.frn_rx_bytes;
+    link_up_1h += b.frn_link_up;
+    link_down_1h += b.frn_link_down;
     join_1h += b.user_join;
     leave_1h += b.user_leave;
   }
@@ -480,13 +508,11 @@ std::vector<std::string> SvxStats::formatStatsGroups()
   DurAgg frn_rx_total_eff = frn_rx_total;
   DurAgg rf_tx_total_eff  = rf_tx_total;
   DurAgg rf_rx_total_eff  = rf_rx_total;
-  DurAgg sql_total_eff    = sql_total;
 
   add_active(frn_tx_active, frn_tx_t0, frn_tx_1h, frn_tx_total_eff);
   add_active(frn_rx_active, frn_rx_t0, frn_rx_1h, frn_rx_total_eff);
   add_active(rf_tx_active,  rf_tx_t0,  rf_tx_1h,  rf_tx_total_eff);
   add_active(rf_rx_active,  rf_rx_t0,  rf_rx_1h,  rf_rx_total_eff);
-  add_active(sql_active,    sql_t0,    sql_1h,    sql_total_eff);
 
   uint64_t unique_1h = 0;
   for (const auto& kv : user_last_seen_minute)
@@ -498,6 +524,13 @@ std::vector<std::string> SvxStats::formatStatsGroups()
   auto pct = [](double sec) -> double { return std::min(100.0, std::max(0.0, sec * 100.0 / 3600.0)); };
   auto sec_u64 = [](double sec) -> uint64_t { return (uint64_t)std::llround(std::max(0.0, sec)); };
 
+  auto age_s = [&](double last) -> int64_t {
+    if (last <= 0.0) return -1;
+    return (int64_t)std::llround(std::max(0.0, now_s - last));
+  };
+  const int64_t frn_rx_age_s = age_s(last_frn_rx_monotonic);
+  const int64_t frn_tx_age_s = age_s(last_frn_tx_monotonic);
+
   std::vector<std::string> out;
   out.reserve(8);
 
@@ -508,6 +541,10 @@ std::vector<std::string> SvxStats::formatStatsGroups()
        << " users=" << frn_users_cur
        << " peak1h=" << peak_1h
        << " uniq1h=" << unique_1h
+       << " linkup1h=" << link_up_1h
+       << " linkdown1h=" << link_down_1h
+       << " rx_age=" << frn_rx_age_s << "s"
+       << " tx_age=" << frn_tx_age_s << "s"
        << " join1h=" << join_1h
        << " leave1h=" << leave_1h;
     out.push_back(os.str());
