@@ -178,18 +178,24 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , is_receiving_voice(false)
   , is_rf_disabled(false)
   , reconnect_timeout_ms(RECONNECT_TIMEOUT_TIME)
-  , opt_frn_debug(true)
+  , opt_frn_debug(false)
 {
   assert(module != 0);
 
   Config &cfg = module->cfg();
   const string &cfg_name = module->cfgName();
 
-  if (cfg.getValue(cfg_name, "FRN_DEBUG", opt_frn_debug))
+  // Debug output is enabled only when FRN_DEBUG=1 is set in the config.
+  bool cfg_has_debug = cfg.getValue(cfg_name, "FRN_DEBUG", opt_frn_debug);
+  if (cfg_has_debug && opt_frn_debug)
     cout << "frn debugging is enabled" << endl;
 
-  if (cfg.getValue(cfg_name, "DISABLE_RF", is_rf_disabled))
+  // DISABLE_RF should only announce when actually enabled.
+  bool cfg_has_disable_rf = cfg.getValue(cfg_name, "DISABLE_RF", is_rf_disabled);
+  if (cfg_has_disable_rf && is_rf_disabled)
     cout << "rf is disabled" << endl;
+
+
 
   if (!cfg.getValue(cfg_name, "SERVER", opt_server))
   {
@@ -513,7 +519,7 @@ void QsoFrn::setState(State newState)
   if (newState != state)
   {
     if (opt_frn_debug)
-      cout << "state: " << stateToString(newState) << endl;
+      if (opt_frn_debug) cout << "state: " << stateToString(newState) << endl;
     state = newState;
     stateChange(newState);
     if (state == STATE_ERROR)
@@ -613,7 +619,7 @@ bool QsoFrn::writeFrame(const char* tag, const std::string& frame)
 
   if (opt_frn_debug)
   {
-    std::cout << "FRN TX(" << tag << ") state=" << state
+    if (opt_frn_debug) std::cout << "FRN TX(" << tag << ") state=" << state
               << " len=" << frame.size()
               << " head=\"" << headPreview(frame) << "\"\n";
   }
@@ -621,7 +627,7 @@ bool QsoFrn::writeFrame(const char* tag, const std::string& frame)
   if (!writeAll(frame))
   {
     if (opt_frn_debug)
-      std::cout << "FRN TX(" << tag << ") writeAll FAILED\n";
+      if (opt_frn_debug) std::cout << "FRN TX(" << tag << ") writeAll FAILED\n";
     return false;
   }
   return true;
@@ -687,23 +693,17 @@ void QsoFrn::tmOutSendNext(Async::Timer*)
 
   PendingTm item = std::move(tm_out_queue.front());
   tm_out_queue.pop_front();
-
-  if (opt_frn_debug)
-  {
-    std::string head = item.frame.substr(0, 40);
-    for (auto &c : head) { if (c == '\r' || c == '\n') c = ' '; }
-    std::cout << "FRN: TM send (state=" << stateToString(state)
-              << ", len=" << item.frame.size()
-              << ", q_rem=" << tm_out_queue.size()
-              << ", head=\"" << head << "\")\n";
-  }
+  // Always-on log for outbound FRN text messages (TM). Audio is not logged here.
+  std::string head = item.frame.substr(0, 80);
+  for (auto &c : head) { if (c == '\r' || c == '\n') c = ' '; }
+  std::cout << "FRN TX TM: len=" << item.frame.size()
+            << " head=\"" << head << "\"" << std::endl;
 
   bool ok = writeAll(item.frame);
-  if (!ok && opt_frn_debug)
+  if (!ok)
   {
     std::cout << "FRN: TM writeAll failed (queue remaining=" << tm_out_queue.size() << ")\n";
   }
-
   if (!tm_out_queue.empty())
   {
     tm_out_timer->setTimeout(tm_out_pace_ms);
@@ -766,7 +766,7 @@ void QsoFrn::sendRequest(Request rq)
       return;
   }
   if (opt_frn_debug)
-    cout << "req:   " << s.str() << endl;
+    if (opt_frn_debug) cout << "req:   " << s.str() << endl;
   if (tcp_client->isConnected())
   {
     s << "\r\n";
@@ -850,8 +850,7 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
   int bytes_read = 0;
   Response cmd = (Response)data[0];
   if (opt_frn_debug)
-    cout << "cmd:   " << cmd << endl;
-
+    if (opt_frn_debug) cout << "cmd:   " << cmd << endl;
   keepalive_timer->reset();
 
   bytes_read += 1;
@@ -916,7 +915,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
   if (opt_frn_debug) {
     std::string raw((char*)data, len);
     std::string head = headPreview(raw, 120);
-    std::cout << "FRN LIST chunk: len=" << len << " lines_to_read=" << lines_to_read
+    if (opt_frn_debug) std::cout << "FRN LIST chunk: len=" << len << " lines_to_read=" << lines_to_read
               << " last_list_response=" << last_list_response
               << " head=\"" << head << "\"" << std::endl;
   }
@@ -941,7 +940,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
   if (lines_to_read == 0)
   {
     if (opt_frn_debug) {
-      std::cout << "FRN LIST complete: items=" << cur_item_list.size()
+      if (opt_frn_debug) std::cout << "FRN LIST complete: items=" << cur_item_list.size()
                 << " state=" << state << " last_list_response=" << last_list_response << std::endl;
     }
     if (state == STATE_RX_CLIENT_LIST)
@@ -960,7 +959,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
         const std::string& msg = cur_item_list[1];
         const std::string& scope = cur_item_list[2];
         if (opt_frn_debug) {
-          std::cout << "FRN LIST->TM triple: from_id='" << from_id
+          if (opt_frn_debug) std::cout << "FRN LIST->TM triple: from_id='" << from_id
                     << "' scope='" << scope
                     << "' msg='" << headPreview(msg, 200) << "'" << std::endl;
         }
@@ -977,7 +976,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
           {
             // Scope is not provided in the XML format; treat as private.
             if (opt_frn_debug) {
-              std::cout << "FRN LIST->TM xml: from_id='" << from_id
+              if (opt_frn_debug) std::cout << "FRN LIST->TM xml: from_id='" << from_id
                         << "' scope='P' msg='" << headPreview(msg, 200) << "'" << std::endl;
             }
             textMessageReceived(from_id, msg, std::string("P"));

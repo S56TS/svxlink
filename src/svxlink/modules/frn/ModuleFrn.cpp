@@ -139,6 +139,7 @@ ModuleFrn::ModuleFrn(void *dl_handle, Logic *logic, const string& cfg_name)
   , audio_fifo(0)
   , aiorsctl_path("/usr/local/bin/aiorsctl")
   , run_cmd_secret("")
+  , frn_debug(false)
   , cmd_exec(0)
   , cmd_busy(false)
 {
@@ -202,6 +203,9 @@ bool ModuleFrn::initialize(void)
     return false;
   }
  
+  // Enable FRN debug output only when FRN_DEBUG=1 is set in the config
+  cfg().getValue(cfgName(), "FRN_DEBUG", frn_debug);
+
   qso = new QsoFrn(this);
   qso->error.connect(
       mem_fun(*this, &ModuleFrn::onQsoError));
@@ -517,9 +521,26 @@ void ModuleFrn::reportState(void)
 
 void ModuleFrn::onQsoError(void)
 {
-  cerr << "QSO errored, deactivating module" << endl;
-  deactivateMe();
+  // NOTE:
+  // On link changes (e.g. eth0 unplug -> wlan0 takeover) DNS may be temporarily
+  // unavailable. The underlying QsoFrn reconnect state-machine will try a
+  // bounded number of reconnect attempts and then raise the error signal.
+  //
+  // Deactivating the module here makes the system stay offline until a manual
+  // re-activation. Instead, keep the module active and restart the QsoFrn
+  // session, effectively extending the reconnect window indefinitely while
+  // still letting QsoFrn handle backoff between attempts.
+  cerr << "QSO errored, restarting FRN session (keep retrying)" << endl;
+
+  if (qso != 0)
+  {
+    // Best-effort: tear down any half-open state then re-initiate connection.
+    // QsoFrn handles its own timing/backoff internally.
+    qso->disconnect();
+    qso->connect();
+  }
 }
+
 
 
 
@@ -736,8 +757,10 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
   if (scope != "P")
   {
     std::string m = trim_copy(msg);
+    if (frn_debug) {
     std::cout << "FRN RunCmd IGNORED (broadcast) from " << from_id
               << ": " << m << std::endl;
+    }
     SvxStats::instance().onCmdBroadcastAttempt();
     return;
   }
@@ -745,8 +768,10 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
   if (!err.empty() && cmd.empty())
   {
     // RunCmd but rejected/unauthorized/invalid (no executable cmd)
+    if (frn_debug) {
     std::cout << "FRN RunCmd REJECTED from " << from_id << ": (" << err << ")"
               << std::endl;
+    }
     if (err.find("AUTH") != std::string::npos) SvxStats::instance().onCmdAuthFailed();
     else SvxStats::instance().onCmdRejected();
     // err already includes "CmdReply: ..." prefix for user-visible error
@@ -806,7 +831,9 @@ if (cmd == "get stats")
 
   if (cmd_busy)
   {
+    if (frn_debug) {
     std::cout << "FRN RunCmd BUSY from " << from_id << ": " << cmd << std::endl;
+    }
     SvxStats::instance().onCmdRejected();
     qso->sendTextMessage(from_id, "CmdReply: ERR: busy");
     return;
@@ -817,7 +844,9 @@ if (cmd == "get stats")
   cmd_stdout.clear();
   cmd_stderr.clear();
 
+  if (frn_debug) {
   std::cout << "FRN RunCmd ACCEPTED from " << from_id << ": " << cmd << std::endl;
+  }
   SvxStats::instance().onCmdAccepted();
   cmd_start_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();

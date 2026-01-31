@@ -163,6 +163,7 @@ class ModuleFrn : public Module
 
     std::string             aiorsctl_path;
     std::string             run_cmd_secret;
+    bool                    frn_debug;
     Async::Exec*            cmd_exec;
     bool                    cmd_busy;
     std::string             cmd_stdout;
