@@ -132,14 +132,12 @@ extern "C" {
 ModuleFrn::ModuleFrn(void *dl_handle, Logic *logic, const string& cfg_name)
   : Module(dl_handle, logic, cfg_name)
   , qso(0)
-  , last_qso_state(QsoFrn::STATE_DISCONNECTED)
   , audio_valve(0)
   , audio_splitter(0)
   , audio_selector(0)
   , audio_fifo(0)
   , aiorsctl_path("/usr/local/bin/aiorsctl")
   , run_cmd_secret("")
-  , frn_debug(false)
   , cmd_exec(0)
   , cmd_busy(false)
 {
@@ -203,9 +201,6 @@ bool ModuleFrn::initialize(void)
     return false;
   }
  
-  // Enable FRN debug output only when FRN_DEBUG=1 is set in the config
-  cfg().getValue(cfgName(), "FRN_DEBUG", frn_debug);
-
   qso = new QsoFrn(this);
   qso->error.connect(
       mem_fun(*this, &ModuleFrn::onQsoError));
@@ -521,26 +516,9 @@ void ModuleFrn::reportState(void)
 
 void ModuleFrn::onQsoError(void)
 {
-  // NOTE:
-  // On link changes (e.g. eth0 unplug -> wlan0 takeover) DNS may be temporarily
-  // unavailable. The underlying QsoFrn reconnect state-machine will try a
-  // bounded number of reconnect attempts and then raise the error signal.
-  //
-  // Deactivating the module here makes the system stay offline until a manual
-  // re-activation. Instead, keep the module active and restart the QsoFrn
-  // session, effectively extending the reconnect window indefinitely while
-  // still letting QsoFrn handle backoff between attempts.
-  cerr << "QSO errored, restarting FRN session (keep retrying)" << endl;
-
-  if (qso != 0)
-  {
-    // Best-effort: tear down any half-open state then re-initiate connection.
-    // QsoFrn handles its own timing/backoff internally.
-    qso->disconnect();
-    qso->connect();
-  }
+  cerr << "QSO errored, deactivating module" << endl;
+  deactivateMe();
 }
-
 
 
 
@@ -556,19 +534,6 @@ void ModuleFrn::onFrnClientListReceived(const FrnList& list)
 
 void ModuleFrn::onQsoStateChange(QsoFrn::State st)
 {
-  // FRN link state: consider "up" when the protocol has reached IDLE or beyond.
-  const bool link_up = (st >= QsoFrn::STATE_IDLE);
-  const bool prev_link_up = (last_qso_state >= QsoFrn::STATE_IDLE);
-  if (link_up && !prev_link_up)
-  {
-    SvxStats::instance().onFrnLinkUp();
-  }
-  else if (!link_up && prev_link_up)
-  {
-    SvxStats::instance().onFrnLinkDown();
-  }
-  last_qso_state = st;
-
   // FRN TX is active in any of the TX audio states.
   const bool is_tx = (st == QsoFrn::STATE_TX_AUDIO ||
                       st == QsoFrn::STATE_TX_AUDIO_APPROVED ||
@@ -605,6 +570,36 @@ static inline std::string tolower_copy(const std::string& s)
                  [](unsigned char c){ return std::tolower(c); });
   return out;
 }
+
+static inline const std::vector<std::string>& supportedRunCmds()
+{
+  static const std::vector<std::string> cmds =
+  {
+    "get stats",
+    "get psu a",
+    "get psu b",
+    "get psu all",
+    "get temp all",
+    "help"
+  };
+  return cmds;
+}
+
+static inline bool isSupportedRunCmd(const std::string& cmd)
+{
+  const auto& cmds = supportedRunCmds();
+  return std::find(cmds.begin(), cmds.end(), cmd) != cmds.end();
+}
+
+static inline std::string runCmdHelpLine()
+{
+  const auto& cmds = supportedRunCmds();
+  std::ostringstream oss;
+  oss << "Supported commands:";
+  for (const auto& c : cmds) oss << " " << c << ";";
+  return oss.str();
+}
+
 
 bool ModuleFrn::parseAndAuthorizeCmd(const std::string& from_id,
                                      const std::string& msg,
@@ -648,29 +643,8 @@ bool ModuleFrn::parseAndAuthorizeCmd(const std::string& from_id,
     return true;
   }
 
-  // Allowlist
-  std::istringstream iss(rest);
-  std::vector<std::string> tok;
-  std::string t;
-  while (iss >> t) tok.push_back(t);
-
-  bool allowed = false;
-  if (tok.size() == 3 && tok[0] == "get" && tok[1] == "psu" &&
-      (tok[2] == "a" || tok[2] == "b" || tok[2] == "all"))
-  {
-    allowed = true;
-  }
-  else if (tok.size() == 3 && tok[0] == "get" && tok[1] == "temp" &&
-           tok[2] == "all")
-  {
-    allowed = true;
-  }
-  else if (tok.size() == 2 && tok[0] == "get" && tok[1] == "stats")
-  {
-    allowed = true;
-  }
-
-  if (!allowed)
+  // Allowlist (single place to update + reused by RunCmd: help)
+  if (!isSupportedRunCmd(rest))
   {
     out_err = "CmdReply: ERR: command not allowed";
     return true;
@@ -757,10 +731,8 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
   if (scope != "P")
   {
     std::string m = trim_copy(msg);
-    if (frn_debug) {
     std::cout << "FRN RunCmd IGNORED (broadcast) from " << from_id
               << ": " << m << std::endl;
-    }
     SvxStats::instance().onCmdBroadcastAttempt();
     return;
   }
@@ -768,10 +740,8 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
   if (!err.empty() && cmd.empty())
   {
     // RunCmd but rejected/unauthorized/invalid (no executable cmd)
-    if (frn_debug) {
     std::cout << "FRN RunCmd REJECTED from " << from_id << ": (" << err << ")"
               << std::endl;
-    }
     if (err.find("AUTH") != std::string::npos) SvxStats::instance().onCmdAuthFailed();
     else SvxStats::instance().onCmdRejected();
     // err already includes "CmdReply: ..." prefix for user-visible error
@@ -785,6 +755,14 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
 // NOTE: Keep this as a SINGLE FRN TM packet (no burst / chunking) because
 // some FRN servers/clients will drop the TCP connection if we emit multiple
 // <TM> packets back-to-back.
+  // Internal command (no aiorsctl): help
+  if (cmd == "help")
+  {
+    SvxStats::instance().onCmdAccepted();
+    sendCmdReplyChunked(from_id, runCmdHelpLine());
+    return;
+  }
+
 if (cmd == "get stats")
 {
   SvxStats::instance().onCmdAccepted();
@@ -831,9 +809,7 @@ if (cmd == "get stats")
 
   if (cmd_busy)
   {
-    if (frn_debug) {
     std::cout << "FRN RunCmd BUSY from " << from_id << ": " << cmd << std::endl;
-    }
     SvxStats::instance().onCmdRejected();
     qso->sendTextMessage(from_id, "CmdReply: ERR: busy");
     return;
@@ -844,9 +820,7 @@ if (cmd == "get stats")
   cmd_stdout.clear();
   cmd_stderr.clear();
 
-  if (frn_debug) {
   std::cout << "FRN RunCmd ACCEPTED from " << from_id << ": " << cmd << std::endl;
-  }
   SvxStats::instance().onCmdAccepted();
   cmd_start_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
