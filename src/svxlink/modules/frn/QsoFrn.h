@@ -390,10 +390,20 @@ public:
     /**
      * @brief Initiate connection to FRN server when connection was lost
      *
-     * Starts new connection retry. If maximum retry count is reached sets
-     * QSO state to error.
+     * Starts a new connection retry. Retries are intentionally unlimited and
+     * use capped backoff so a temporary network outage cannot stop FRN.
      */
     void reconnect();
+
+    /**
+     * @brief Close any current connection attempt and schedule a reconnect.
+     */
+    void forceReconnect(const std::string& reason);
+
+    /**
+     * @brief Schedule the next reconnect attempt.
+     */
+    void scheduleReconnect(const std::string& reason);
 
     /**
      * @brief Starts initial FRN server login process
@@ -418,7 +428,7 @@ public:
      *
      * This method is used to send FRN control request.
      */
-    void sendRequest(Request rq);
+    bool sendRequest(Request rq);
 
     /**
      * @brief Consumed and handles incoming data when in loging in stage
@@ -562,7 +572,6 @@ public:
     static const int        RX_TIMEOUT_TIME         = 1000;
     static const int        KEEPALIVE_TIMEOUT_TIME  = 5000;
 
-    static const int        MAX_CONNECT_RETRY_CNT   = 10;
     static const int        RECONNECT_TIMEOUT_TIME  = 5*1000;
     static const int        RECONNECT_MAX_TIMEOUT   = 2*60*1000;
     static CONSTEXPR float  RECONNECT_BACKOFF       = 1.2f;

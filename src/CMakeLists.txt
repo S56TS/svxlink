@@ -344,6 +344,7 @@ install(
   FILES
     ${CMAKE_CURRENT_LIST_DIR}/../events.d/local/Logic.tcl
     ${CMAKE_CURRENT_LIST_DIR}/../events.d/local/aiors.tcl
+    ${CMAKE_CURRENT_LIST_DIR}/../events.d/local/aiors_frn_autostart.tcl
   DESTINATION ${SVX_SHARE_INSTALL_DIR}/events.d/local
 )
 

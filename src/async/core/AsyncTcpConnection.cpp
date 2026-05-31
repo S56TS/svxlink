@@ -592,7 +592,12 @@ void TcpConnection::onWriteSpaceAvailable(Async::FdWatch* w)
   }
   else
   {
+    int errno_tmp = errno;
     perror("### TcpConnection::onWriteSpaceAvailable: rawWrite()");
+    closeConnection();
+    errno = errno_tmp;
+    onDisconnected(DR_SYSTEM_ERROR);
+    return;
   }
   w->setEnabled(!m_write_buf.empty());
 } /* TcpConnection::onWriteSpaceAvailable */

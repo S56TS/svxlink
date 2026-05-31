@@ -168,7 +168,7 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , rx_timeout_timer(new Timer(RX_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , con_timeout_timer(new Timer(CON_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , keepalive_timer(new Timer(KEEPALIVE_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
-  , reconnect_timer(new Timer(KEEPALIVE_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
+  , reconnect_timer(new Timer(RECONNECT_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
   , state(STATE_DISCONNECTED)
   , connect_retry_cnt(0)
   , send_buffer_cnt(0)
@@ -335,13 +335,19 @@ QsoFrn::~QsoFrn(void)
   con_timeout_timer = 0;
 
   delete rx_timeout_timer;
-  con_timeout_timer = 0;
+  rx_timeout_timer = 0;
 
   delete tcp_client;
   tcp_client = 0;
 
   delete keepalive_timer;
   keepalive_timer = 0;
+
+  delete reconnect_timer;
+  reconnect_timer = 0;
+
+  delete tm_out_timer;
+  tm_out_timer = 0;
 
   gsm_destroy(gsmh);
   gsmh = 0;
@@ -356,7 +362,16 @@ bool QsoFrn::initOk(void)
 
 void QsoFrn::connect(bool is_backup)
 {
+  reconnect_timer->setEnable(false);
+
+  if (!tcp_client->isIdle())
+  {
+    tcp_client->disconnect();
+  }
+
   setState(STATE_CONNECTING);
+  con_timeout_timer->setEnable(true);
+  con_timeout_timer->reset();
 
   server = is_backup ? opt_server_backup : opt_server;
   port = is_backup ? opt_port_backup : opt_port;
@@ -368,11 +383,19 @@ void QsoFrn::connect(bool is_backup)
 
 void QsoFrn::disconnect(void)
 {
+  reconnect_timer->setEnable(false);
+  rx_timeout_timer->setEnable(false);
+  if (tm_out_timer != 0)
+  {
+    tm_out_timer->setEnable(false);
+  }
+  tm_out_queue.clear();
+
   setState(STATE_DISCONNECTED);
 
   con_timeout_timer->setEnable(false);
 
-  if (tcp_client->isConnected())
+  if (tcp_client != 0)
   {
     tcp_client->disconnect();
   }
@@ -423,12 +446,14 @@ int QsoFrn::writeSamples(const float *samples, int count)
 
   if (state == STATE_IDLE)
   {
-    sendRequest(RQ_TX0);
+    if (!sendRequest(RQ_TX0))
+    {
+      return 0;
+    }
     setState(STATE_TX_AUDIO_WAITING);
   }
 
   int samples_read = 0;
-  con_timeout_timer->reset();
 
   while (samples_read < count)
   {
@@ -551,7 +576,10 @@ void QsoFrn::login(void)
   s << endl;
 
   std::string req = s.str();
-  tcp_client->write(req.c_str(), req.length());
+  if (!writeAll(req))
+  {
+    forceReconnect("FRN login write failed");
+  }
 }
 
 void QsoFrn::sendVoiceData(short *data, int len)
@@ -572,13 +600,17 @@ void QsoFrn::sendVoiceData(short *data, int len)
 
     nbytes += GSM_FRAME_SIZE;
   }
-  sendRequest(RQ_TX1);
-  size_t written = tcp_client->write(gsm_data, nbytes);
+  if (!sendRequest(RQ_TX1))
+  {
+    return;
+  }
+  int written = tcp_client->write(gsm_data, nbytes);
   frnTxBytes((uint64_t)nbytes);
-  if (written != nbytes)
+  if (written < 0 || static_cast<size_t>(written) != nbytes)
   {
     cerr << "not all voice data was written to FRN: "
          << written << "\\" << nbytes << endl;
+    forceReconnect("FRN voice write failed");
   }
 }
 
@@ -592,18 +624,39 @@ void QsoFrn::reconnect(void)
     reconnect_timeout_ms = RECONNECT_MAX_TIMEOUT;
   }
 
-  if (connect_retry_cnt++ < MAX_CONNECT_RETRY_CNT)
+  ++connect_retry_cnt;
+  cout << "reconnecting #" << connect_retry_cnt << endl;
+  connect(!is_using_backup_server);
+}
+
+
+void QsoFrn::forceReconnect(const std::string& reason)
+{
+  disconnect();
+  scheduleReconnect(reason);
+}
+
+
+void QsoFrn::scheduleReconnect(const std::string& reason)
+{
+  if (!reason.empty())
   {
-    cout << "reconnecting #" << connect_retry_cnt << endl;
-    connect(!is_using_backup_server);
+    cout << reason << endl;
   }
-  else
+
+  setState(STATE_DISCONNECTED);
+  con_timeout_timer->setEnable(false);
+  rx_timeout_timer->setEnable(false);
+  if (tm_out_timer != 0)
   {
-    cerr << "failed to reconnect " << MAX_CONNECT_RETRY_CNT << " times" << endl;
-    connect_retry_cnt = 0;
-    reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
-    setState(STATE_ERROR);
+    tm_out_timer->setEnable(false);
   }
+  tm_out_queue.clear();
+
+  cout << "reconnecting in " << reconnect_timeout_ms << " ms" << endl;
+  reconnect_timer->setTimeout(reconnect_timeout_ms);
+  reconnect_timer->setEnable(true);
+  reconnect_timer->reset();
 }
 
 std::string QsoFrn::headPreview(const std::string& s, size_t n)
@@ -628,6 +681,7 @@ bool QsoFrn::writeFrame(const char* tag, const std::string& frame)
   {
     if (opt_frn_debug)
       if (opt_frn_debug) std::cout << "FRN TX(" << tag << ") writeAll FAILED\n";
+    forceReconnect("FRN frame write failed");
     return false;
   }
   return true;
@@ -642,10 +696,10 @@ bool QsoFrn::writeAll(const std::string& out)
   const size_t len = out.size();
   while (off < len)
   {
-    size_t n = tcp_client->write(out.c_str() + off, len - off);
-    if (n == 0)
+    int n = tcp_client->write(out.c_str() + off, len - off);
+    if (n <= 0)
       return false;
-    off += n;
+    off += static_cast<size_t>(n);
   }
   return true;
 }
@@ -703,6 +757,8 @@ void QsoFrn::tmOutSendNext(Async::Timer*)
   if (!ok)
   {
     std::cout << "FRN: TM writeAll failed (queue remaining=" << tm_out_queue.size() << ")\n";
+    forceReconnect("FRN text message write failed");
+    return;
   }
   if (!tm_out_queue.empty())
   {
@@ -739,7 +795,7 @@ bool QsoFrn::sendTextMessage(const std::string& to_id, const std::string& msg)
 }
 
 
-void QsoFrn::sendRequest(Request rq)
+bool QsoFrn::sendRequest(Request rq)
 {
   std::stringstream s;
 
@@ -763,21 +819,30 @@ void QsoFrn::sendRequest(Request rq)
 
     default:
       cerr << "unknown request " << rq << endl;
-      return;
+      return false;
   }
   if (opt_frn_debug)
     if (opt_frn_debug) cout << "req:   " << s.str() << endl;
-  if (tcp_client->isConnected())
+  if (!tcp_client->isConnected())
   {
-    s << "\r\n";
-    std::string rq_s = s.str();
-    size_t written = tcp_client->write(rq_s.c_str(), rq_s.length());
-    if (written != rq_s.length())
+    if (state != STATE_DISCONNECTED)
     {
-      cerr << "request " << rq_s << " was not written to FRN: "
-           << written << "\\" << rq_s.length() << endl;
+      forceReconnect("FRN request failed: TCP is not connected");
     }
+    return false;
   }
+
+  s << "\r\n";
+  std::string rq_s = s.str();
+  int written = tcp_client->write(rq_s.c_str(), rq_s.length());
+  if (written < 0 || static_cast<size_t>(written) != rq_s.length())
+  {
+    cerr << "request " << rq_s << " was not written to FRN: "
+         << written << "\\" << rq_s.length() << endl;
+    forceReconnect("FRN request write failed");
+    return false;
+  }
+  return true;
 }
 
 
@@ -858,8 +923,10 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
   switch (cmd)
   {
     case DT_IDLE:
-      sendRequest(RQ_P);
-      setState(STATE_IDLE);
+      if (sendRequest(RQ_P))
+      {
+        setState(STATE_IDLE);
+      }
       break;
 
     case DT_DO_TX:
@@ -1012,8 +1079,8 @@ int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
       }
       else
       {
-        setState(STATE_ERROR);
         cerr << "login stage 1 failed: " << line << endl;
+        forceReconnect("FRN login stage 1 failed");
       }
     }
     else
@@ -1022,13 +1089,17 @@ int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
           line.find("<AL>WRONG</AL>") == std::string::npos)
       {
         setState(STATE_IDLE);
-        sendRequest(RQ_RX0);
-        cout << "login stage 2 completed: " << line << endl;
+        if (sendRequest(RQ_RX0))
+        {
+          connect_retry_cnt = 0;
+          reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
+          cout << "login stage 2 completed: " << line << endl;
+        }
       }
       else
       {
-        setState(STATE_ERROR);
         cerr << "login stage 2 failed: " << line << endl;
+        forceReconnect("FRN login stage 2 failed");
       }
     }
     bytes_read += line.length() + (has_win_newline ? 2 : 1);
@@ -1042,8 +1113,6 @@ void QsoFrn::onConnected(void)
   //cout << __FUNCTION__ << endl;
   setState(STATE_CONNECTED);
 
-  connect_retry_cnt = 0;
-  reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
   con_timeout_timer->setEnable(true);
   con_timeout_timer->reset();
   login();
@@ -1055,6 +1124,7 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
 {
   //cout << __FUNCTION__ << " ";
   bool needs_reconnect = false;
+  std::string reconnect_reason;
 
   setState(STATE_DISCONNECTED);
 
@@ -1065,18 +1135,21 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
     case TcpConnection::DR_HOST_NOT_FOUND:
       cout << "DR_HOST_NOT_FOUND" << endl;
       needs_reconnect = true;
+      reconnect_reason = "FRN host not found";
       break;
 
     case TcpConnection::DR_REMOTE_DISCONNECTED:
       cout << "DR_REMOTE_DISCONNECTED" << ", "
            << conn->disconnectReasonStr(reason) << endl;
       needs_reconnect = true;
+      reconnect_reason = "FRN remote disconnected";
       break;
 
     case TcpConnection::DR_SYSTEM_ERROR:
       cout << "DR_SYSTEM_ERROR" << ", "
            << conn->disconnectReasonStr(reason) << endl;
       needs_reconnect = true;
+      reconnect_reason = "FRN system error";
       break;
 
     //case TcpConnection::DR_RECV_BUFFER_OVERFLOW:
@@ -1088,18 +1161,37 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
       cout << "DR_ORDERED_DISCONNECT" << endl;
       break;
 
+    case TcpConnection::DR_PROTOCOL_ERROR:
+      cout << "DR_PROTOCOL_ERROR" << ", "
+           << conn->disconnectReasonStr(reason) << endl;
+      needs_reconnect = true;
+      reconnect_reason = "FRN protocol error";
+      break;
+
+    case TcpConnection::DR_SWITCH_PEER:
+      cout << "DR_SWITCH_PEER" << ", "
+           << conn->disconnectReasonStr(reason) << endl;
+      needs_reconnect = true;
+      reconnect_reason = "FRN switch peer disconnect";
+      break;
+
+    case TcpConnection::DR_BAD_STATE:
+      cout << "DR_BAD_STATE" << ", "
+           << conn->disconnectReasonStr(reason) << endl;
+      needs_reconnect = true;
+      reconnect_reason = "FRN TCP bad state";
+      break;
+
     default:
       cout << "DR_UNKNOWN" << endl;
-      setState(STATE_ERROR);
+      needs_reconnect = true;
+      reconnect_reason = "FRN unknown disconnect";
       break;
   }
 
   if (needs_reconnect)
   {
-    cout << "reconnecting in " << reconnect_timeout_ms << " ms" << endl;
-    reconnect_timer->setEnable(true);
-    reconnect_timer->setTimeout(reconnect_timeout_ms);
-    reconnect_timer->reset();
+    scheduleReconnect(reconnect_reason);
   }
 }
 
@@ -1177,8 +1269,10 @@ void QsoFrn::onConnectTimeout(Timer *timer)
   // in *any* state except DISCONNECTED.
   if (state != STATE_DISCONNECTED)
   {
-    cout << "FRN connection watchdog timeout in state "
-         << stateToString(state) << " -> reconnect" << endl;
+    std::stringstream ss;
+    ss << "FRN connection watchdog timeout in state "
+       << stateToString(state);
+    cout << ss.str() << " -> reconnect" << endl;
     disconnect();
     reconnect();
   }

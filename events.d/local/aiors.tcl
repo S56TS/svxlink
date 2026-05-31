@@ -567,6 +567,16 @@ proc ::AIORS::ensure_hooks {} {
 # Install now
 ::AIORS::ensure_hooks
 
+# ---- Optional AIORS companion scripts ----
+set ::AIORS::script_dir [file dirname [info script]]
+set ::AIORS::frn_autostart_script \
+  [file join $::AIORS::script_dir "aiors_frn_autostart.tcl"]
+if {[file readable $::AIORS::frn_autostart_script]} {
+  source $::AIORS::frn_autostart_script
+} else {
+  ::AIORS::_dbg "AIORS FRN autostart script not found: $::AIORS::frn_autostart_script"
+}
+
 # ---- delayed re-hook after Logic is fully mixed in ----
 after 0 {
   catch {
