@@ -914,7 +914,8 @@ void LocalTx::setModulation(Modulation::Type mod)
 
 void LocalTx::transmit(bool do_transmit)
 {
-  if (do_transmit == isTransmitting())
+  if ((do_transmit == isTransmitting()) &&
+      !(tx_timeout_occured && !do_transmit))
   {
     return;
   }
@@ -1006,12 +1007,17 @@ void LocalTx::txTimeoutOccured(Timer *t)
   cerr << "*** ERROR: Transmitter " << name()
        << " have been active for too long. Turning it off...\n";
   
-  if (!setPtt(false))
+  bool ptt_off = setPtt(false);
+  if (!ptt_off)
   {
     perror("setPin");
   }
   
   tx_timeout_occured = true;
+  if (ptt_off)
+  {
+    setIsTransmitting(false);
+  }
   txTimeout();
 } /* LocalTx::txTimeoutOccured */
 
