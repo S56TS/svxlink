@@ -10,6 +10,7 @@ namespace eval ::AIORS {
   # ---- knobs ----
   variable debug 0
   variable cfg_logged 0
+  variable announcement_cfg_logged 0
 
 
   # One-shot suppression flag: suppress automatic post-IDENT status report (keeps DTMF-requested reports)
@@ -21,13 +22,20 @@ namespace eval ::AIORS {
 
   # Config: disable repeater close / roger beep (read from svxlink.conf)
   variable disable_rpt_close_beep 0
+  variable announcement_delay_ms 0
 
   # Hook state
   variable hooked_rx 0
   variable hooked_tx 0
   variable hooked_rgr 0
+  variable hooked_announcement_delay 0
   variable rx_hook_retries 0
   variable rehook_scheduled 0
+  variable announcement_delay_done 0
+  variable announcement_delay_injecting 0
+  variable tx_is_on 0
+  variable tx_state
+  if {![array exists tx_state]} { array set tx_state {} }
 
   # Beep state
   variable start_ts [clock milliseconds]
@@ -189,6 +197,111 @@ proc ::AIORS::led_tx {tx_id is_on} {
   }
 }
 
+proc ::AIORS::_note_tx_state {tx_id is_on} {
+  set is_on [expr {$is_on ? 1 : 0}]
+  if {$tx_id eq ""} { set tx_id "0" }
+
+  set ::AIORS::tx_state($tx_id) $is_on
+  set ::AIORS::tx_is_on 0
+  foreach id [array names ::AIORS::tx_state] {
+    if {$::AIORS::tx_state($id)} {
+      set ::AIORS::tx_is_on 1
+      break
+    }
+  }
+
+  if {!$::AIORS::tx_is_on} {
+    set ::AIORS::announcement_delay_done 0
+  }
+}
+
+proc ::AIORS::_tx_active {} {
+  if {[info exists ::AIORS::tx_is_on] && $::AIORS::tx_is_on} {
+    return 1
+  }
+
+  if {[array exists ::AIORS::tx_state]} {
+    foreach id [array names ::AIORS::tx_state] {
+      if {$::AIORS::tx_state($id)} {
+        return 1
+      }
+    }
+  }
+
+  return 0
+}
+
+proc ::AIORS::_first_generated_audio {kind args} {
+  if {![info exists ::AIORS::announcement_delay_ms] ||
+      $::AIORS::announcement_delay_ms <= 0} {
+    return
+  }
+  if {[info exists ::AIORS::announcement_delay_injecting] &&
+      $::AIORS::announcement_delay_injecting} {
+    return
+  }
+  if {[info exists ::AIORS::announcement_delay_done] &&
+      $::AIORS::announcement_delay_done} {
+    return
+  }
+  if {[::AIORS::_tx_active]} {
+    return
+  }
+
+  set delay_ms $::AIORS::announcement_delay_ms
+  if {$kind eq "playSilence"} {
+    set existing_ms 0
+    if {[llength $args] >= 1 && [string is integer -strict [lindex $args 0]]} {
+      set existing_ms [lindex $args 0]
+    }
+    set delay_ms [expr {$delay_ms - $existing_ms}]
+  }
+
+  set ::AIORS::announcement_delay_done 1
+  if {$delay_ms <= 0} {
+    return
+  }
+
+  if {[info exists ::AIORS::debug] && $::AIORS::debug} {
+    ::AIORS::_dbg "announcement preamble: inserting ${delay_ms}ms before $kind"
+  }
+
+  set ::AIORS::announcement_delay_injecting 1
+  if {[catch {::playSilence $delay_ms} err]} {
+    ::AIORS::_warn "AIORS: announcement preamble failed: $err"
+  }
+  set ::AIORS::announcement_delay_injecting 0
+}
+
+proc ::AIORS::_install_announcement_delay {} {
+  if {$::AIORS::hooked_announcement_delay} { return 1 }
+
+  foreach p [list ::playSilence ::playFile ::playTone ::playDtmf] {
+    if {[info commands $p] eq ""} {
+      continue
+    }
+
+    set orig "${p}__aiors_announcement_orig"
+    if {[info commands $orig] ne ""} {
+      continue
+    }
+
+    if {[catch {rename $p $orig} err]} {
+      ::AIORS::_warn "AIORS: announcement preamble rename failed for $p: $err"
+      continue
+    }
+
+    proc $p args [string map [list "@KIND@" [namespace tail $p] "@ORIG@" $orig] {
+      catch { ::AIORS::_first_generated_audio "@KIND@" {*}$args }
+      return [uplevel 1 [list @ORIG@ {*}$args]]
+    }]
+  }
+
+  set ::AIORS::hooked_announcement_delay 1
+  ::AIORS::_log "AIORS: announcement preamble loaded: delay=${::AIORS::announcement_delay_ms}ms"
+  return 1
+}
+
 # ---- wrapper helper (proc-only; used for transmit) ----
 proc ::AIORS::_wrap_proc {procname wrapper_body} {
   if {[info procs $procname] eq ""} { return 0 }
@@ -229,6 +342,7 @@ proc ::AIORS::_try_install_tx_hook {} {
         return [uplevel 1 [list @ORIG@ {*}$args]]
       }
 
+      catch { ::AIORS::_note_tx_state $tx_id $is_on }
       catch { ::AIORS::led_tx $tx_id $is_on }
       return [uplevel 1 [list @ORIG@ {*}$args]]
     }]} {
@@ -551,12 +665,37 @@ proc ::AIORS::ensure_hooks {} {
     ::AIORS::_log "DISABLE_RPT_CLOSE_BEEP=$::AIORS::disable_rpt_close_beep (raw='$raw' from $cfg) (repeat)"
   }
 
+  set raw_delay [::AIORS::_ini_get $cfg $::AIORS::logic_name "AIORS_ANNOUNCEMENT_DELAY_MS" ""]
+  if {$raw_delay eq ""} {
+    set raw_delay [::AIORS::_ini_get $cfg $::AIORS::logic_name "ANNOUNCEMENT_DELAY_MS" ""]
+  }
+  if {$raw_delay eq ""} {
+    set raw_delay [::AIORS::_ini_get $cfg "GLOBAL" "AIORS_ANNOUNCEMENT_DELAY_MS" ""]
+  }
+  if {$raw_delay eq ""} {
+    set raw_delay [::AIORS::_ini_get $cfg "GLOBAL" "ANNOUNCEMENT_DELAY_MS" "0"]
+  }
+  if {![string is integer -strict $raw_delay] || $raw_delay < 0} {
+    ::AIORS::_warn "AIORS: invalid AIORS_ANNOUNCEMENT_DELAY_MS='$raw_delay', using 0"
+    set raw_delay 0
+  }
+  set ::AIORS::announcement_delay_ms $raw_delay
+  if {![info exists ::AIORS::announcement_cfg_logged] || !$::AIORS::announcement_cfg_logged} {
+    set ::AIORS::announcement_cfg_logged 1
+    ::AIORS::_log "AIORS_ANNOUNCEMENT_DELAY_MS=$::AIORS::announcement_delay_ms (from $cfg)"
+  } elseif {[info exists ::AIORS::debug] && $::AIORS::debug} {
+    ::AIORS::_log "AIORS_ANNOUNCEMENT_DELAY_MS=$::AIORS::announcement_delay_ms (repeat)"
+  }
+
   ::AIORS::_try_install_tx_hook
   ::AIORS::_try_install_rx_hook
   ::AIORS::_schedule_rx_rehook
 
 
   ::AIORS::_install_status_report_suppress
+  if {$::AIORS::announcement_delay_ms > 0} {
+    ::AIORS::_install_announcement_delay
+  }
   if {$::AIORS::disable_rpt_close_beep} {
     ::AIORS::_install_beep_override
   }
