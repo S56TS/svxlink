@@ -34,6 +34,7 @@ namespace eval ::AIORS {
   variable announcement_delay_done 0
   variable announcement_delay_injecting 0
   variable tx_is_on 0
+  variable tx_started_ms 0
   variable tx_state
   if {![array exists tx_state]} { array set tx_state {} }
 
@@ -201,6 +202,7 @@ proc ::AIORS::_note_tx_state {tx_id is_on} {
   set is_on [expr {$is_on ? 1 : 0}]
   if {$tx_id eq ""} { set tx_id "0" }
 
+  set was_on [::AIORS::_tx_active]
   set ::AIORS::tx_state($tx_id) $is_on
   set ::AIORS::tx_is_on 0
   foreach id [array names ::AIORS::tx_state] {
@@ -210,7 +212,11 @@ proc ::AIORS::_note_tx_state {tx_id is_on} {
     }
   }
 
-  if {!$::AIORS::tx_is_on} {
+  if {$::AIORS::tx_is_on && !$was_on} {
+    set ::AIORS::tx_started_ms [clock milliseconds]
+    set ::AIORS::announcement_delay_done 0
+  } elseif {!$::AIORS::tx_is_on} {
+    set ::AIORS::tx_started_ms 0
     set ::AIORS::announcement_delay_done 0
   }
 }
@@ -244,11 +250,19 @@ proc ::AIORS::_first_generated_audio {kind args} {
       $::AIORS::announcement_delay_done} {
     return
   }
+  set delay_ms $::AIORS::announcement_delay_ms
   if {[::AIORS::_tx_active]} {
-    return
+    if {![info exists ::AIORS::tx_started_ms] || $::AIORS::tx_started_ms <= 0} {
+      return
+    }
+
+    set elapsed_ms [expr {[clock milliseconds] - $::AIORS::tx_started_ms}]
+    if {$elapsed_ms >= $delay_ms} {
+      return
+    }
+    set delay_ms [expr {$delay_ms - $elapsed_ms}]
   }
 
-  set delay_ms $::AIORS::announcement_delay_ms
   if {$kind eq "playSilence"} {
     set existing_ms 0
     if {[llength $args] >= 1 && [string is integer -strict [lindex $args 0]]} {
