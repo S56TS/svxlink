@@ -600,9 +600,9 @@ void QsoFrn::sendVoiceData(short *data, int len)
     short * src = data + nframe * PCM_FRAME_SIZE;
     unsigned char * dst = gsm_data + nframe * GSM_FRAME_SIZE;
 
-    // GSM_OPT_WAV49, produce alternating frames 33, 32, 33, 32, ..
+    // GSM_OPT_WAV49, produce alternating frames 32, 33, 32, 33, ..
     gsm_encode(gsmh, src, dst);
-    gsm_encode(gsmh, src + PCM_FRAME_SIZE / 2, dst + 33);
+    gsm_encode(gsmh, src + PCM_FRAME_SIZE / 2, dst + 32);
 
     nbytes += GSM_FRAME_SIZE;
   }
