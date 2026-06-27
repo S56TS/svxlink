@@ -600,9 +600,9 @@ void QsoFrn::sendVoiceData(short *data, int len)
     short * src = data + nframe * PCM_FRAME_SIZE;
     unsigned char * dst = gsm_data + nframe * GSM_FRAME_SIZE;
 
-    // GSM_OPT_WAV49, produce alternating frames 33, 32, 33, 32, ..
+    // GSM_OPT_WAV49, produce alternating frames 32, 33, 32, 33, ..
     gsm_encode(gsmh, src, dst);
-    gsm_encode(gsmh, src + PCM_FRAME_SIZE / 2, dst + 33);
+    gsm_encode(gsmh, src + PCM_FRAME_SIZE / 2, dst + 32);
 
     nbytes += GSM_FRAME_SIZE;
   }
@@ -890,18 +890,40 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
            << " state=" << stateToString(state) << endl;
     }
 
+    if (opt_frn_debug && rx_voice_packets <= 3)
+    {
+      cout << "FRN RX raw header: client_index=" << (unsigned short)(data[1] | data[0] << 8)
+           << " len=" << len << " first8=";
+      for (int i = 0; i < 8; ++i)
+      {
+        cout << hex << static_cast<int>(gsm_data[i]) << dec << (i == 7 ? "" : " ");
+      }
+      cout << endl;
+    }
+
     for (int frameno = 0; frameno < FRAME_COUNT; frameno++)
     {
       unsigned char *src = gsm_data + frameno * GSM_FRAME_SIZE;
       short *dst = pcm_buffer;
-      bool is_gsm_decode_success = true;
+      bool is_gsm_decode_success = false;
 
-      // GSM_OPT_WAV49, consume alternating frames of size 33, 32, 33, 32, ..
-      if (gsm_decode(gsmh, src, dst) == -1)
-        is_gsm_decode_success = false;
-
-      if (gsm_decode(gsmh, src + 33, dst + PCM_FRAME_SIZE / 2) == -1)
-        is_gsm_decode_success = false;
+      // Some FRN peers use the 33/32 layout while others use the 32/33 layout.
+      // Try both so the receiver can tolerate either framing variant.
+      if (gsm_decode(gsmh, src, dst) != -1)
+      {
+        if (gsm_decode(gsmh, src + 33, dst + PCM_FRAME_SIZE / 2) != -1)
+        {
+          is_gsm_decode_success = true;
+        }
+        else if (gsm_decode(gsmh, src + 32, dst + PCM_FRAME_SIZE / 2) != -1)
+        {
+          is_gsm_decode_success = true;
+        }
+      }
+      else if (gsm_decode(gsmh, src + 32, dst + PCM_FRAME_SIZE / 2) != -1)
+      {
+        is_gsm_decode_success = true;
+      }
 
       if (!is_gsm_decode_success)
       {
