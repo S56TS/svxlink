@@ -80,6 +80,34 @@ using namespace Async;
 
 namespace
 {
+  bool initGsmWav49(gsm& handle, const char* label)
+  {
+    if (handle != 0)
+    {
+      gsm_destroy(handle);
+      handle = 0;
+    }
+
+    handle = gsm_create();
+    if (handle == 0)
+    {
+      cerr << "*** ERROR: Failed to create FRN " << label
+           << " GSM codec" << endl;
+      return false;
+    }
+
+    int gsm_one = 1;
+    if (gsm_option(handle, GSM_OPT_WAV49, &gsm_one) == -1)
+    {
+      cerr << "*** ERROR: Failed to enable WAV49 mode on FRN "
+           << label << " GSM codec" << endl;
+      gsm_destroy(handle);
+      handle = 0;
+      return false;
+    }
+    return true;
+  }
+
   bool extractTagValue(const std::string& s, const std::string& tag,
                        std::string& out)
   {
@@ -172,7 +200,8 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , state(STATE_DISCONNECTED)
   , connect_retry_cnt(0)
   , send_buffer_cnt(0)
-  , gsmh(gsm_create())
+  , gsmh_tx(0)
+  , gsmh_rx(0)
   , lines_to_read(-1)
   , last_list_response(DT_IDLE)
   , is_receiving_voice(false)
@@ -286,8 +315,11 @@ QsoFrn::QsoFrn(ModuleFrn *module)
     return;
   }
 
-  int gsm_one = 1;
-  assert(gsm_option(gsmh, GSM_OPT_WAV49, &gsm_one) != -1);
+  if (!initGsmWav49(gsmh_tx, "TX") ||
+      !initGsmWav49(gsmh_rx, "RX"))
+  {
+    return;
+  }
 
   tcp_client->connected.connect(
       mem_fun(*this, &QsoFrn::onConnected));
@@ -353,8 +385,16 @@ QsoFrn::~QsoFrn(void)
   delete tm_out_timer;
   tm_out_timer = 0;
 
-  gsm_destroy(gsmh);
-  gsmh = 0;
+  if (gsmh_tx != 0)
+  {
+    gsm_destroy(gsmh_tx);
+    gsmh_tx = 0;
+  }
+  if (gsmh_rx != 0)
+  {
+    gsm_destroy(gsmh_rx);
+    gsmh_rx = 0;
+  }
 }
 
 
@@ -450,6 +490,11 @@ int QsoFrn::writeSamples(const float *samples, int count)
 
   if (state == STATE_IDLE)
   {
+    if (!initGsmWav49(gsmh_tx, "TX"))
+    {
+      return 0;
+    }
+    send_buffer_cnt = 0;
     if (!sendRequest(RQ_TX0))
     {
       if (opt_frn_debug)
@@ -595,14 +640,23 @@ void QsoFrn::sendVoiceData(short *data, int len)
   size_t nbytes = 0;
   unsigned char gsm_data[FRN_AUDIO_PACKET_SIZE];
 
+  if (gsmh_tx == 0 && !initGsmWav49(gsmh_tx, "TX"))
+  {
+    ++tx_voice_drops;
+    cerr << "FRN TX: GSM encoder unavailable; voice frame dropped"
+         << " (drops=" << tx_voice_drops << ")" << endl;
+    return;
+  }
+
   for (int nframe = 0; nframe < FRAME_COUNT; nframe++)
   {
     short * src = data + nframe * PCM_FRAME_SIZE;
     unsigned char * dst = gsm_data + nframe * GSM_FRAME_SIZE;
 
-    // GSM_OPT_WAV49, produce alternating frames 33, 32, 33, 32, ..
-    gsm_encode(gsmh, src, dst);
-    gsm_encode(gsmh, src + PCM_FRAME_SIZE / 2, dst + 33);
+    // GSM WAV49 packs two 160-sample frames into 65 bytes. The second
+    // encode starts at +32 because the pair shares the boundary byte.
+    gsm_encode(gsmh_tx, src, dst);
+    gsm_encode(gsmh_tx, src + PCM_FRAME_SIZE / 2, dst + 32);
 
     nbytes += GSM_FRAME_SIZE;
   }
@@ -877,6 +931,7 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
   {
     unsigned short client_index = data[1] | data[0] << 8;
     is_receiving_voice = true;
+    initGsmWav49(gsmh_rx, "RX");
     if (client_index > 0 && client_index <= client_list.size())
       rxVoiceStarted(client_list[client_index - 1]);
   }
@@ -905,28 +960,22 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
     {
       unsigned char *src = gsm_data + frameno * GSM_FRAME_SIZE;
       short *dst = pcm_buffer;
-      bool is_gsm_decode_success = false;
+      memset(dst, 0, sizeof(*dst) * PCM_FRAME_SIZE);
 
-      // Some FRN peers use the 33/32 layout while others use the 32/33 layout.
-      // Try both so the receiver can tolerate either framing variant.
-      int decode_rc0 = gsm_decode(gsmh, src, dst);
+      int decode_rc0 = -1;
       int decode_rc1 = -1;
-      if (decode_rc0 != -1)
+      if (gsmh_rx != 0)
       {
-        decode_rc1 = gsm_decode(gsmh, src + 33, dst + PCM_FRAME_SIZE / 2);
-        if (decode_rc1 != -1)
+        // GSM WAV49 consumes the same 65-byte pair produced above:
+        // first half at +0, second half at +33.
+        decode_rc0 = gsm_decode(gsmh_rx, src, dst);
+        if (decode_rc0 != -1)
         {
-          is_gsm_decode_success = true;
-        }
-        else if (gsm_decode(gsmh, src + 32, dst + PCM_FRAME_SIZE / 2) != -1)
-        {
-          is_gsm_decode_success = true;
+          decode_rc1 = gsm_decode(gsmh_rx, src + 33,
+                                  dst + PCM_FRAME_SIZE / 2);
         }
       }
-      else if (gsm_decode(gsmh, src + 32, dst + PCM_FRAME_SIZE / 2) != -1)
-      {
-        is_gsm_decode_success = true;
-      }
+      bool is_gsm_decode_success = (decode_rc0 != -1 && decode_rc1 != -1);
 
       if (opt_frn_debug && rx_voice_packets <= 3)
       {
@@ -942,9 +991,12 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
       if (!is_gsm_decode_success)
       {
         ++rx_voice_drops;
+        memset(dst, 0, sizeof(*dst) * PCM_FRAME_SIZE);
         if (opt_frn_debug || rx_voice_drops <= 5)
           cerr << "FRN RX: gsm decoder failed for frame " << frameno
+               << "; inserting silence"
                << " (drops=" << rx_voice_drops << ")" << endl;
+        initGsmWav49(gsmh_rx, "RX");
       }
 
       for (int i = 0; i < PCM_FRAME_SIZE; i++)

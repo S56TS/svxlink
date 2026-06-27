@@ -605,7 +605,8 @@ public:
     short               receive_buffer[BUFFER_SIZE];
     short               send_buffer[BUFFER_SIZE];
     int                 send_buffer_cnt;
-    gsm                 gsmh;
+    gsm                 gsmh_tx;
+    gsm                 gsmh_rx;
     int                 lines_to_read;
     Response            last_list_response;
     FrnList             cur_item_list;
