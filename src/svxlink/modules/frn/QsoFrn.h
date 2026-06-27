@@ -613,6 +613,10 @@ public:
     bool                is_receiving_voice;
     bool                is_rf_disabled;
     int                 reconnect_timeout_ms;
+    uint64_t            tx_voice_packets;
+    uint64_t            rx_voice_packets;
+    uint64_t            tx_voice_drops;
+    uint64_t            rx_voice_drops;
     std::string         server;
     std::string         port;
 

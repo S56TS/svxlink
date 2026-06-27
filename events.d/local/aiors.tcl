@@ -316,11 +316,11 @@ proc ::AIORS::_install_announcement_delay {} {
   return 1
 }
 
-# ---- wrapper helper (proc-only; used for transmit) ----
+# ---- wrapper helper (used for transmit) ----
 proc ::AIORS::_wrap_proc {procname wrapper_body} {
-  if {[info procs $procname] eq ""} { return 0 }
+  if {[info commands $procname] eq ""} { return 0 }
   set orig "${procname}__aiors_orig"
-  if {[info procs $orig] ne ""} { return 1 }
+  if {[info commands $orig] ne ""} { return 1 }
   rename $procname $orig
   set body [string map [list "@ORIG@" $orig] $wrapper_body]
   proc $procname args $body
@@ -405,14 +405,18 @@ proc ::AIORS::_try_install_rx_hook {} {
     # Install wrapper
     proc $p args [string map [list "@ORIG@" "${p}__aiors_orig"] {
       # Expected signature: squelch_open rx_id is_open
-      set rx_id   [lindex $args 0]
-      set is_open [lindex $args 1]
-
-      # If called as squelch_open is_open (rare), treat first arg as is_open and rx_id=0
-      if {![string is integer -strict $rx_id] && $rx_id ne ""} {
-        set is_open $rx_id
+      # Legacy signature:  squelch_open is_open
+      set argc [llength $args]
+      if {$argc == 1} {
         set rx_id 0
+        set is_open [lindex $args 0]
+      } elseif {$argc >= 2} {
+        set rx_id   [lindex $args 0]
+        set is_open [lindex $args 1]
+      } else {
+        return [uplevel 1 [list @ORIG@ {*}$args]]
       }
+
       if {$rx_id eq ""} { set rx_id 0 }
       if {$is_open eq ""} { set is_open 0 }
 

@@ -178,6 +178,10 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , is_receiving_voice(false)
   , is_rf_disabled(false)
   , reconnect_timeout_ms(RECONNECT_TIMEOUT_TIME)
+  , tx_voice_packets(0)
+  , rx_voice_packets(0)
+  , tx_voice_drops(0)
+  , rx_voice_drops(0)
   , opt_frn_debug(false)
 {
   assert(module != 0);
@@ -448,6 +452,8 @@ int QsoFrn::writeSamples(const float *samples, int count)
   {
     if (!sendRequest(RQ_TX0))
     {
+      if (opt_frn_debug)
+        cerr << "FRN TX: failed to issue TX0 request" << endl;
       return 0;
     }
     setState(STATE_TX_AUDIO_WAITING);
@@ -602,16 +608,28 @@ void QsoFrn::sendVoiceData(short *data, int len)
   }
   if (!sendRequest(RQ_TX1))
   {
+    if (opt_frn_debug)
+      cerr << "FRN TX: TX1 request failed; voice frame dropped" << endl;
     return;
   }
-  int written = tcp_client->write(gsm_data, nbytes);
-  frnTxBytes((uint64_t)nbytes);
-  if (written < 0 || static_cast<size_t>(written) != nbytes)
+
+  ++tx_voice_packets;
+  if (opt_frn_debug && (tx_voice_packets <= 5 || tx_voice_packets % 50 == 0))
   {
-    cerr << "not all voice data was written to FRN: "
-         << written << "\\" << nbytes << endl;
-    forceReconnect("FRN voice write failed");
+    cout << "FRN TX audio packet=" << tx_voice_packets
+         << " bytes=" << nbytes << " state=" << stateToString(state) << endl;
   }
+
+  std::string frame(reinterpret_cast<const char*>(gsm_data), nbytes);
+  if (!writeAll(frame))
+  {
+    ++tx_voice_drops;
+    cerr << "FRN TX: voice frame write failed (drops=" << tx_voice_drops
+         << ", packet=" << tx_voice_packets << ", bytes=" << nbytes << ")" << endl;
+    return;
+  }
+
+  frnTxBytes((uint64_t)nbytes);
 }
 
 
@@ -823,23 +841,21 @@ bool QsoFrn::sendRequest(Request rq)
   }
   if (opt_frn_debug)
     if (opt_frn_debug) cout << "req:   " << s.str() << endl;
+
   if (!tcp_client->isConnected())
   {
     if (state != STATE_DISCONNECTED)
     {
-      forceReconnect("FRN request failed: TCP is not connected");
+      cerr << "request failed: TCP is not connected" << endl;
     }
     return false;
   }
 
   s << "\r\n";
   std::string rq_s = s.str();
-  int written = tcp_client->write(rq_s.c_str(), rq_s.length());
-  if (written < 0 || static_cast<size_t>(written) != rq_s.length())
+  if (!writeAll(rq_s))
   {
-    cerr << "request " << rq_s << " was not written to FRN: "
-         << written << "\\" << rq_s.length() << endl;
-    forceReconnect("FRN request write failed");
+    cerr << "request " << rq_s << " was not written to FRN" << endl;
     return false;
   }
   return true;
@@ -867,6 +883,13 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
 
   if (!is_rf_disabled)
   {
+    ++rx_voice_packets;
+    if (opt_frn_debug && (rx_voice_packets <= 5 || rx_voice_packets % 50 == 0))
+    {
+      cout << "FRN RX audio packet=" << rx_voice_packets
+           << " state=" << stateToString(state) << endl;
+    }
+
     for (int frameno = 0; frameno < FRAME_COUNT; frameno++)
     {
       unsigned char *src = gsm_data + frameno * GSM_FRAME_SIZE;
@@ -881,7 +904,12 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
         is_gsm_decode_success = false;
 
       if (!is_gsm_decode_success)
-        cerr << "gsm decoder failed to decode frame " << frameno << endl;
+      {
+        ++rx_voice_drops;
+        if (opt_frn_debug || rx_voice_drops <= 5)
+          cerr << "FRN RX: gsm decoder failed for frame " << frameno
+               << " (drops=" << rx_voice_drops << ")" << endl;
+      }
 
       for (int i = 0; i < PCM_FRAME_SIZE; i++)
          pcm_samples[i] = static_cast<float>(pcm_buffer[i]) / 32768.0;
@@ -893,8 +921,13 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
             PCM_FRAME_SIZE - all_written);
         if (written == 0)
         {
-          cerr << "cannot write frame to sink, dropping sample "
-               << (PCM_FRAME_SIZE - all_written) << endl;
+          ++rx_voice_drops;
+          if (opt_frn_debug || rx_voice_drops <= 5)
+          {
+            cerr << "FRN RX: sink write stalled, dropping sample "
+                 << (PCM_FRAME_SIZE - all_written)
+                 << " (drops=" << rx_voice_drops << ")" << endl;
+          }
           break;
         }
         all_written += written;
