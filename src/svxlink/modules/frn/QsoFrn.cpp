@@ -909,9 +909,12 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
 
       // Some FRN peers use the 33/32 layout while others use the 32/33 layout.
       // Try both so the receiver can tolerate either framing variant.
-      if (gsm_decode(gsmh, src, dst) != -1)
+      int decode_rc0 = gsm_decode(gsmh, src, dst);
+      int decode_rc1 = -1;
+      if (decode_rc0 != -1)
       {
-        if (gsm_decode(gsmh, src + 33, dst + PCM_FRAME_SIZE / 2) != -1)
+        decode_rc1 = gsm_decode(gsmh, src + 33, dst + PCM_FRAME_SIZE / 2);
+        if (decode_rc1 != -1)
         {
           is_gsm_decode_success = true;
         }
@@ -923,6 +926,17 @@ int QsoFrn::handleAudioData(unsigned char *data, int len)
       else if (gsm_decode(gsmh, src + 32, dst + PCM_FRAME_SIZE / 2) != -1)
       {
         is_gsm_decode_success = true;
+      }
+
+      if (opt_frn_debug && rx_voice_packets <= 3)
+      {
+        cout << "FRN RX frame=" << frameno << " rc0=" << decode_rc0
+             << " rc1=" << decode_rc1 << " first8=";
+        for (int i = 0; i < 8; ++i)
+        {
+          cout << hex << static_cast<int>(src[i]) << dec << (i == 7 ? "" : " ");
+        }
+        cout << endl;
       }
 
       if (!is_gsm_decode_success)
