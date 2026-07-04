@@ -11,6 +11,7 @@ namespace eval ::AIORS {
   variable debug 0
   variable cfg_logged 0
   variable announcement_cfg_logged 0
+  variable reply_cfg_logged 0
 
 
   # One-shot suppression flag: suppress automatic post-IDENT status report (keeps DTMF-requested reports)
@@ -23,6 +24,8 @@ namespace eval ::AIORS {
   # Config: disable repeater close / roger beep (read from svxlink.conf)
   variable disable_rpt_close_beep 0
   variable announcement_delay_ms 0
+  variable reply_delay_ms 0
+  variable reply_delay_window_ms 3000
 
   # Hook state
   variable hooked_rx 0
@@ -33,6 +36,9 @@ namespace eval ::AIORS {
   variable rehook_scheduled 0
   variable announcement_delay_done 0
   variable announcement_delay_injecting 0
+  variable reply_delay_pending 0
+  variable reply_delay_done 0
+  variable reply_delay_injecting 0
   variable tx_is_on 0
   variable tx_started_ms 0
   variable tx_state
@@ -238,29 +244,101 @@ proc ::AIORS::_tx_active {} {
 }
 
 proc ::AIORS::_first_generated_audio {kind args} {
-  if {![info exists ::AIORS::announcement_delay_ms] ||
-      $::AIORS::announcement_delay_ms <= 0} {
-    return
-  }
   if {[info exists ::AIORS::announcement_delay_injecting] &&
       $::AIORS::announcement_delay_injecting} {
     return
   }
-  if {[info exists ::AIORS::announcement_delay_done] &&
-      $::AIORS::announcement_delay_done} {
+  if {[info exists ::AIORS::reply_delay_injecting] &&
+      $::AIORS::reply_delay_injecting} {
     return
   }
-  set delay_ms $::AIORS::announcement_delay_ms
-  if {[::AIORS::_tx_active]} {
-    if {![info exists ::AIORS::tx_started_ms] || $::AIORS::tx_started_ms <= 0} {
-      return
+
+  set now [clock milliseconds]
+  set delay_ms 0
+  set apply_announcement 0
+  set apply_reply 0
+  set announcement_remaining_ms 0
+  set reply_remaining_ms 0
+
+  set announcement_pending 0
+  if {[info exists ::AIORS::announcement_delay_ms] &&
+      $::AIORS::announcement_delay_ms > 0} {
+    set announcement_pending 1
+    if {[info exists ::AIORS::announcement_delay_done] &&
+        $::AIORS::announcement_delay_done} {
+      set announcement_pending 0
+    }
+  }
+
+  if {$announcement_pending} {
+    set apply_announcement 1
+    set announcement_remaining_ms $::AIORS::announcement_delay_ms
+    if {[::AIORS::_tx_active]} {
+      if {[info exists ::AIORS::tx_started_ms] && $::AIORS::tx_started_ms > 0} {
+        set elapsed_ms [expr {$now - $::AIORS::tx_started_ms}]
+        if {$elapsed_ms >= $announcement_remaining_ms} {
+          set announcement_remaining_ms 0
+        } elseif {$elapsed_ms > 0} {
+          set announcement_remaining_ms [expr {$announcement_remaining_ms - $elapsed_ms}]
+        }
+      } else {
+        set announcement_remaining_ms 0
+      }
     }
 
-    set elapsed_ms [expr {[clock milliseconds] - $::AIORS::tx_started_ms}]
-    if {$elapsed_ms >= $delay_ms} {
-      return
+    if {$announcement_remaining_ms > $delay_ms} {
+      set delay_ms $announcement_remaining_ms
     }
-    set delay_ms [expr {$delay_ms - $elapsed_ms}]
+  }
+
+  set reply_pending 0
+  if {[info exists ::AIORS::reply_delay_ms] &&
+      $::AIORS::reply_delay_ms > 0 &&
+      [info exists ::AIORS::reply_delay_pending] &&
+      $::AIORS::reply_delay_pending} {
+    set reply_pending 1
+    if {[info exists ::AIORS::reply_delay_done] &&
+        $::AIORS::reply_delay_done} {
+      set reply_pending 0
+    }
+  }
+
+  if {$reply_pending} {
+    if {![info exists ::AIORS::last_valid_close_ts] ||
+        $::AIORS::last_valid_close_ts <= 0} {
+      set ::AIORS::reply_delay_pending 0
+    } else {
+      set elapsed_ms [expr {$now - $::AIORS::last_valid_close_ts}]
+      if {$elapsed_ms < 0} {
+        set elapsed_ms 0
+      }
+
+      set window_ms 3000
+      if {[info exists ::AIORS::reply_delay_window_ms] &&
+          $::AIORS::reply_delay_window_ms > 0} {
+        set window_ms $::AIORS::reply_delay_window_ms
+      }
+      if {$window_ms < $::AIORS::reply_delay_ms} {
+        set window_ms $::AIORS::reply_delay_ms
+      }
+
+      if {$elapsed_ms > $window_ms} {
+        set ::AIORS::reply_delay_pending 0
+      } else {
+        set apply_reply 1
+        set reply_remaining_ms [expr {$::AIORS::reply_delay_ms - $elapsed_ms}]
+        if {$reply_remaining_ms < 0} {
+          set reply_remaining_ms 0
+        }
+        if {$reply_remaining_ms > $delay_ms} {
+          set delay_ms $reply_remaining_ms
+        }
+      }
+    }
+  }
+
+  if {!$apply_announcement && !$apply_reply} {
+    return
   }
 
   if {$kind eq "playSilence"} {
@@ -271,20 +349,35 @@ proc ::AIORS::_first_generated_audio {kind args} {
     set delay_ms [expr {$delay_ms - $existing_ms}]
   }
 
-  set ::AIORS::announcement_delay_done 1
+  if {$apply_announcement} {
+    set ::AIORS::announcement_delay_done 1
+  }
+  if {$apply_reply} {
+    set ::AIORS::reply_delay_done 1
+    set ::AIORS::reply_delay_pending 0
+  }
   if {$delay_ms <= 0} {
     return
   }
 
   if {[info exists ::AIORS::debug] && $::AIORS::debug} {
-    ::AIORS::_dbg "announcement preamble: inserting ${delay_ms}ms before $kind"
+    set reasons [list]
+    if {$apply_announcement} {
+      lappend reasons "announcement=${announcement_remaining_ms}ms"
+    }
+    if {$apply_reply} {
+      lappend reasons "reply=${reply_remaining_ms}ms"
+    }
+    ::AIORS::_dbg "generated audio delay: inserting ${delay_ms}ms before $kind ([join $reasons {, }])"
   }
 
   set ::AIORS::announcement_delay_injecting 1
+  set ::AIORS::reply_delay_injecting 1
   if {[catch {::playSilence $delay_ms} err]} {
-    ::AIORS::_warn "AIORS: announcement preamble failed: $err"
+    ::AIORS::_warn "AIORS: generated audio delay failed: $err"
   }
   set ::AIORS::announcement_delay_injecting 0
+  set ::AIORS::reply_delay_injecting 0
 }
 
 proc ::AIORS::_install_announcement_delay {} {
@@ -312,7 +405,7 @@ proc ::AIORS::_install_announcement_delay {} {
   }
 
   set ::AIORS::hooked_announcement_delay 1
-  ::AIORS::_log "AIORS: announcement preamble loaded: delay=${::AIORS::announcement_delay_ms}ms"
+  ::AIORS::_log "AIORS: generated audio delay hook loaded: announcement=${::AIORS::announcement_delay_ms}ms reply=${::AIORS::reply_delay_ms}ms"
   return 1
 }
 
@@ -627,17 +720,23 @@ proc ::AIORS::_install_status_report_suppress {} {
 
 
 
-# ---- Optional: track close timestamp to support beep gating ----
+# ---- Track close timestamp to support beep gating and reply delay ----
 # If your system uses a separate "squelch_close" proc somewhere, you can hook it later.
 # For now, we infer close timing from squelch_open wrapper when is_open=0.
 # (So we update last_valid_close_ts there by adding a tiny shim here.)
 #
-# Keep it cheap: only when debug is enabled or beep override is enabled.
+# Keep it cheap: this only updates a timestamp and a one-shot delay flag.
 #
 proc ::AIORS::_note_close_if_needed {is_open} {
-  if {!$is_open} {
-    set ::AIORS::last_valid_close_ts [clock milliseconds]
+  if {$is_open} {
+    set ::AIORS::reply_delay_pending 0
+    set ::AIORS::reply_delay_done 0
+    return
   }
+
+  set ::AIORS::last_valid_close_ts [clock milliseconds]
+  set ::AIORS::reply_delay_pending 1
+  set ::AIORS::reply_delay_done 0
 }
 
 # Patch the RX wrapper behavior slightly by injecting close timestamp update:
@@ -705,13 +804,35 @@ proc ::AIORS::ensure_hooks {} {
     ::AIORS::_log "AIORS_ANNOUNCEMENT_DELAY_MS=$::AIORS::announcement_delay_ms (repeat)"
   }
 
+  set raw_reply_delay [::AIORS::_ini_get $cfg $::AIORS::logic_name "AIORS_REPLY_DELAY_MS" ""]
+  if {$raw_reply_delay eq ""} {
+    set raw_reply_delay [::AIORS::_ini_get $cfg $::AIORS::logic_name "REPLY_DELAY_MS" ""]
+  }
+  if {$raw_reply_delay eq ""} {
+    set raw_reply_delay [::AIORS::_ini_get $cfg "GLOBAL" "AIORS_REPLY_DELAY_MS" ""]
+  }
+  if {$raw_reply_delay eq ""} {
+    set raw_reply_delay [::AIORS::_ini_get $cfg "GLOBAL" "REPLY_DELAY_MS" "0"]
+  }
+  if {![string is integer -strict $raw_reply_delay] || $raw_reply_delay < 0} {
+    ::AIORS::_warn "AIORS: invalid AIORS_REPLY_DELAY_MS='$raw_reply_delay', using 0"
+    set raw_reply_delay 0
+  }
+  set ::AIORS::reply_delay_ms $raw_reply_delay
+  if {![info exists ::AIORS::reply_cfg_logged] || !$::AIORS::reply_cfg_logged} {
+    set ::AIORS::reply_cfg_logged 1
+    ::AIORS::_log "AIORS_REPLY_DELAY_MS=$::AIORS::reply_delay_ms (from $cfg)"
+  } elseif {[info exists ::AIORS::debug] && $::AIORS::debug} {
+    ::AIORS::_log "AIORS_REPLY_DELAY_MS=$::AIORS::reply_delay_ms (repeat)"
+  }
+
   ::AIORS::_try_install_tx_hook
   ::AIORS::_try_install_rx_hook
   ::AIORS::_schedule_rx_rehook
 
 
   ::AIORS::_install_status_report_suppress
-  if {$::AIORS::announcement_delay_ms > 0} {
+  if {$::AIORS::announcement_delay_ms > 0 || $::AIORS::reply_delay_ms > 0} {
     ::AIORS::_install_announcement_delay
   }
   if {$::AIORS::disable_rpt_close_beep} {
