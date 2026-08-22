@@ -132,14 +132,17 @@ extern "C" {
 ModuleFrn::ModuleFrn(void *dl_handle, Logic *logic, const string& cfg_name)
   : Module(dl_handle, logic, cfg_name)
   , qso(0)
+  , last_qso_state(QsoFrn::STATE_DISCONNECTED)
+  , aiorsctl_path("/usr/local/bin/aiorsctl")
+  , run_cmd_secret("")
+  , frn_debug(false)
+  , cmd_exec(0)
+  , cmd_busy(false)
+  , cmd_start_ms(0)
   , audio_valve(0)
   , audio_splitter(0)
   , audio_selector(0)
   , audio_fifo(0)
-  , aiorsctl_path("/usr/local/bin/aiorsctl")
-  , run_cmd_secret("")
-  , cmd_exec(0)
-  , cmd_busy(false)
 {
   cout << "\tModule Frn v" MODULE_FRN_VERSION " starting...\n";
 
@@ -532,8 +535,25 @@ void ModuleFrn::onFrnClientListReceived(const FrnList& list)
   SvxStats::instance().onFrnClientListUpdate(v);
 }
 
+static inline bool isFrnLinkUpState(QsoFrn::State st)
+{
+  return st >= QsoFrn::STATE_IDLE;
+}
+
 void ModuleFrn::onQsoStateChange(QsoFrn::State st)
 {
+  const bool was_link_up = isFrnLinkUpState(last_qso_state);
+  const bool is_link_up = isFrnLinkUpState(st);
+  if (is_link_up && !was_link_up)
+  {
+    SvxStats::instance().onFrnLinkUp();
+  }
+  else if (!is_link_up && was_link_up)
+  {
+    SvxStats::instance().onFrnLinkDown();
+  }
+  last_qso_state = st;
+
   // FRN TX is active in any of the TX audio states.
   const bool is_tx = (st == QsoFrn::STATE_TX_AUDIO ||
                       st == QsoFrn::STATE_TX_AUDIO_APPROVED ||

@@ -14,6 +14,15 @@ CARD_SAMPLE_RATE=48000
 #CARD_CHANNELS=1
 #LOCATION_INFO=LocationInfo
 #LINKS=ReflectorLink,LinkToR4
+#STATS_INTERVAL=60
+STATS_LOG_TO_STDOUT=0
+STATS_PERSIST_PATH=@SVX_LOCAL_STATE_DIR@/svxstats_totals.txt
+STATS_SNAPSHOT_PATH=@SVX_LOCAL_STATE_DIR@/svxstats_snapshot.txt
+STATS_HISTORY_PATH=@SVX_LOCAL_STATE_DIR@/svxstats_history.log
+STATS_AIORS_ENABLE=1
+STATS_AIORSCTL_PATH=/usr/local/bin/aiorsctl
+# Independent from STATS_INTERVAL so rolling min/max values retain detail.
+STATS_AIORS_SAMPLE_INTERVAL=30
 
 [SimplexLogic]
 TYPE=Simplex

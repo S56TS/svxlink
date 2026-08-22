@@ -455,10 +455,40 @@ int main(int argc, char **argv)
     if (stats_int_s == 0) stats_int_s = 60;
   }
 
-  std::string stats_persist_path = "/var/lib/svxlink/svxstats_totals.txt";
+  std::string stats_persist_path =
+      std::string(SVX_LOCAL_STATE_DIR) + "/svxstats_totals.txt";
   cfg.getValue("GLOBAL", "STATS_PERSIST_PATH", stats_persist_path);
+  std::string stats_snapshot_path =
+      std::string(SVX_LOCAL_STATE_DIR) + "/svxstats_snapshot.txt";
+  cfg.getValue("GLOBAL", "STATS_SNAPSHOT_PATH", stats_snapshot_path);
+  std::string stats_history_path =
+      std::string(SVX_LOCAL_STATE_DIR) + "/svxstats_history.log";
+  cfg.getValue("GLOBAL", "STATS_HISTORY_PATH", stats_history_path);
+  bool stats_log_to_stdout = false;
+  cfg.getValue("GLOBAL", "STATS_LOG_TO_STDOUT", stats_log_to_stdout);
+  bool stats_aiors_enable = true;
+  cfg.getValue("GLOBAL", "STATS_AIORS_ENABLE", stats_aiors_enable);
+  std::string stats_aiorsctl_path = "/usr/local/bin/aiorsctl";
+  cfg.getValue("GLOBAL", "STATS_AIORSCTL_PATH", stats_aiorsctl_path);
+  unsigned stats_aiors_sample_interval_s = 30;
+  std::string stats_aiors_sample_interval_str;
+  if (cfg.getValue("GLOBAL", "STATS_AIORS_SAMPLE_INTERVAL",
+                   stats_aiors_sample_interval_str))
+  {
+    const int configured_interval = atoi(stats_aiors_sample_interval_str.c_str());
+    if (configured_interval > 0)
+      stats_aiors_sample_interval_s =
+          static_cast<unsigned>(configured_interval);
+  }
 
   SvxStats::instance().setPersistPath(stats_persist_path);
+  SvxStats::instance().setSnapshotPath(stats_snapshot_path);
+  SvxStats::instance().setHistoryPath(stats_history_path);
+  SvxStats::instance().setLogToStdout(stats_log_to_stdout);
+  SvxStats::instance().setAiorsDiagnosticsEnabled(stats_aiors_enable);
+  SvxStats::instance().setAiorsctlPath(stats_aiorsctl_path);
+  SvxStats::instance().setAiorsSampleInterval(
+      stats_aiors_sample_interval_s);
   SvxStats::instance().loadPersistedTotals();
   SvxStats::instance().start(stats_int_s);
 
