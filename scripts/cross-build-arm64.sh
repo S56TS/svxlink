@@ -16,13 +16,17 @@ toolchain="$repo_dir/cmake/toolchains/raspberrypi-arm64.cmake"
 jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')}
 cross_prefix=${CROSS_ARM64_PREFIX:-aarch64-linux-gnu-}
 pkgconfig_libdir=${CROSS_ARM64_PKG_CONFIG_LIBDIR:-/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig}
-source_commit=$(git -C "$repo_dir" rev-parse HEAD)
-source_describe=$(git -C "$repo_dir" describe --tags --always 2>/dev/null || printf '%s' "$source_commit")
+git_repo() {
+  git -c core.autocrlf=true -c core.filemode=false -C "$repo_dir" "$@"
+}
+
+source_commit=$(git_repo rev-parse HEAD)
+source_describe=$(git_repo describe --tags --always 2>/dev/null || printf '%s' "$source_commit")
 source_dirty=0
-if ! git -C "$repo_dir" diff --quiet HEAD -- . ':(exclude)prebuilt/**'; then
+if ! git_repo diff --quiet HEAD -- . ':(exclude)prebuilt/**'; then
   source_dirty=1
 fi
-if git -C "$repo_dir" ls-files --others --exclude-standard |
+if git_repo ls-files --others --exclude-standard |
     grep -Ev '^(build-cross|prebuilt)/' | grep -q .; then
   source_dirty=1
 fi
