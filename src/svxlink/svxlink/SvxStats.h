@@ -185,6 +185,36 @@ private:
     double fault_s = 0.0;
   };
 
+  struct AiorsTotals
+  {
+    std::array<StatusAgg, AIORS_STATUS_COUNT> statuses{};
+    uint64_t success_samples = 0;
+    uint64_t failure_samples = 0;
+    uint64_t psu_a_state_changes = 0;
+    uint64_t psu_b_state_changes = 0;
+    uint64_t psu_a_fault_events = 0;
+    uint64_t psu_b_fault_events = 0;
+    uint64_t restart_events = 0;
+    uint64_t degraded_samples = 0;
+    uint64_t fault_samples = 0;
+    double state_coverage_s = 0.0;
+    double energy_coverage_s = 0.0;
+    double psu_a_energy_coverage_s = 0.0;
+    double psu_b_energy_coverage_s = 0.0;
+    double psu_a_energy_wh = 0.0;
+    double psu_b_energy_wh = 0.0;
+    double psu_a_charge_ah = 0.0;
+    double psu_b_charge_ah = 0.0;
+    double psu_a_on_s = 0.0;
+    double psu_a_off_s = 0.0;
+    double psu_b_on_s = 0.0;
+    double psu_b_off_s = 0.0;
+    double psu_a_fault_s = 0.0;
+    double psu_b_fault_s = 0.0;
+    double degraded_s = 0.0;
+    double fault_s = 0.0;
+  };
+
   struct AiorsWindow
   {
     std::array<MetricAgg, AIORS_METRIC_COUNT> metrics{};
@@ -209,6 +239,7 @@ private:
 
   bool parseAiorsDiagnostics(const std::string& text, AiorsSample& sample,
                              std::string& error) const;
+  void updateAiorsTotals(const AiorsSample& sample);
   void trimAiorsHistory(double now_s);
   AiorsWindow aggregateAiorsWindow(double now_s, double window_s) const;
   void appendAiorsStats(std::ostringstream& os, double now_s) const;
@@ -269,6 +300,7 @@ private:
   std::string aiors_stderr;
   std::deque<AiorsSample> aiors_samples;
   std::deque<double> aiors_failure_times;
+  AiorsTotals aiors_totals;
   double last_aiors_attempt_monotonic = 0.0;
   double last_aiors_success_monotonic = 0.0;
   bool last_aiors_attempt_ok = false;

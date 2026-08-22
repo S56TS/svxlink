@@ -2,6 +2,8 @@
 
 #include <AsyncExec.h>
 #include <AsyncTimer.h>
+#include <config.h>
+#include <version/SVXLINK.h>
 
 #include <iostream>
 #include <iomanip>
@@ -497,11 +499,13 @@ std::string SvxStats::formatStatsLine()
   std::ostringstream os;
   os.setf(std::ios::fixed);
   os << "STATS"
-     << " stats_schema=2"
+     << " stats_schema=3"
      << " ts_unix_s=" << unix_now_sec()
      << " uptime_s=" << uptimeSeconds()
      << " linux_uptime_s=" << linuxUptimeSeconds()
      << " svxlink_uptime_s=" << uptimeSeconds()
+     << " svxlink_software_version=" << stats_token(SVXLINK_APP_VERSION)
+     << " svxlink_software_revision=" << stats_token(PROJECT_VERSION)
      << " linux_boot_id=" << linux_boot_id
      << " frn_link_up_evt_1h=" << link_up_1h
      << " frn_link_down_evt_1h=" << link_down_1h
@@ -849,6 +853,7 @@ void SvxStats::onAiorsDiagnosticsExited()
   const double now_s = mono_now_sec();
   sample.monotonic_s = now_s;
   sample.unix_s = unix_now_sec();
+  updateAiorsTotals(sample);
   aiors_samples.push_back(sample);
   last_aiors_attempt_monotonic = now_s;
   last_aiors_success_monotonic = now_s;
@@ -863,6 +868,7 @@ void SvxStats::recordAiorsFailure(const std::string& reason)
   last_aiors_attempt_monotonic = now_s;
   last_aiors_attempt_ok = false;
   last_aiors_error = stats_token(reason);
+  ++aiors_totals.failure_samples;
   aiors_failure_times.push_back(now_s);
   trimAiorsHistory(now_s);
 }
@@ -1035,6 +1041,109 @@ bool SvxStats::parseAiorsDiagnostics(const std::string& text,
   }
 
   return true;
+}
+
+void SvxStats::updateAiorsTotals(const AiorsSample& sample)
+{
+  ++aiors_totals.success_samples;
+  if (sample.overall_status == "degraded")
+    ++aiors_totals.degraded_samples;
+  else if (sample.overall_status == "fault")
+    ++aiors_totals.fault_samples;
+
+  for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
+  {
+    if (sample.statuses[status] == "fault")
+      ++aiors_totals.statuses[status].fault_samples;
+  }
+
+  if (aiors_samples.empty())
+    return;
+
+  const AiorsSample& previous = aiors_samples.back();
+  if (sample.uptime_s < previous.uptime_s)
+    ++aiors_totals.restart_events;
+
+  const double gap_s = sample.monotonic_s - previous.monotonic_s;
+  const double stale_after_s = std::max(5.0,
+      static_cast<double>(aiors_sample_interval_s) * 3.0);
+  const bool continuous = gap_s >= 0.0 && gap_s <= stale_after_s &&
+      sample.uptime_s >= previous.uptime_s;
+  if (!continuous)
+    return;
+
+  aiors_totals.state_coverage_s += gap_s;
+  if (previous.psu_a_state == "on")
+    aiors_totals.psu_a_on_s += gap_s;
+  else if (previous.psu_a_state == "off")
+    aiors_totals.psu_a_off_s += gap_s;
+  if (previous.psu_b_state == "on")
+    aiors_totals.psu_b_on_s += gap_s;
+  else if (previous.psu_b_state == "off")
+    aiors_totals.psu_b_off_s += gap_s;
+  if (previous.psu_a_fault == "yes")
+    aiors_totals.psu_a_fault_s += gap_s;
+  if (previous.psu_b_fault == "yes")
+    aiors_totals.psu_b_fault_s += gap_s;
+  if (previous.overall_status == "degraded")
+    aiors_totals.degraded_s += gap_s;
+  else if (previous.overall_status == "fault")
+    aiors_totals.fault_s += gap_s;
+
+  if (sample.psu_a_state != previous.psu_a_state)
+    ++aiors_totals.psu_a_state_changes;
+  if (sample.psu_b_state != previous.psu_b_state)
+    ++aiors_totals.psu_b_state_changes;
+  if (sample.psu_a_fault == "yes" && previous.psu_a_fault != "yes")
+    ++aiors_totals.psu_a_fault_events;
+  if (sample.psu_b_fault == "yes" && previous.psu_b_fault != "yes")
+    ++aiors_totals.psu_b_fault_events;
+
+  for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
+  {
+    StatusAgg& total = aiors_totals.statuses[status];
+    if (previous.statuses[status] == "fault")
+      total.fault_s += gap_s;
+    if (sample.statuses[status] == "fault" &&
+        previous.statuses[status] != "fault")
+    {
+      ++total.fault_events;
+    }
+  }
+
+  const double elapsed_hours = gap_s / 3600.0;
+  auto integrate_channel = [&](AiorsMetric current_metric,
+                               AiorsMetric power_metric,
+                               double& charge_ah,
+                               double& energy_wh,
+                               double& coverage_s) -> bool
+  {
+    if (!previous.valid[current_metric] || !sample.valid[current_metric] ||
+        !previous.valid[power_metric] || !sample.valid[power_metric])
+    {
+      return false;
+    }
+
+    const double average_current = std::max(0.0,
+        (previous.values[current_metric] + sample.values[current_metric]) / 2.0);
+    const double average_power = std::max(0.0,
+        (previous.values[power_metric] + sample.values[power_metric]) / 2.0);
+    charge_ah += average_current * elapsed_hours;
+    energy_wh += average_power * elapsed_hours;
+    coverage_s += gap_s;
+    return true;
+  };
+
+  const bool channel_a_integrated = integrate_channel(
+      AIORS_PSU_A_CURRENT, AIORS_PSU_A_POWER,
+      aiors_totals.psu_a_charge_ah, aiors_totals.psu_a_energy_wh,
+      aiors_totals.psu_a_energy_coverage_s);
+  const bool channel_b_integrated = integrate_channel(
+      AIORS_PSU_B_CURRENT, AIORS_PSU_B_POWER,
+      aiors_totals.psu_b_charge_ah, aiors_totals.psu_b_energy_wh,
+      aiors_totals.psu_b_energy_coverage_s);
+  if (channel_a_integrated && channel_b_integrated)
+    aiors_totals.energy_coverage_s += gap_s;
 }
 
 void SvxStats::trimAiorsHistory(double now_s)
@@ -1233,6 +1342,56 @@ void SvxStats::appendAiorsStats(std::ostringstream& os, double now_s) const
        << (current ? stats_token(current->digital_inputs[i]) : "na");
   }
 
+  os << " aiors_samples_ok_total=" << aiors_totals.success_samples
+     << " aiors_samples_failed_total=" << aiors_totals.failure_samples
+     << " aiors_state_coverage_s_total="
+     << seconds(aiors_totals.state_coverage_s)
+     << " aiors_energy_coverage_s_total="
+     << seconds(aiors_totals.energy_coverage_s)
+     << " aiors_restart_evt_total=" << aiors_totals.restart_events
+     << " aiors_degraded_samples_total=" << aiors_totals.degraded_samples
+     << " aiors_fault_samples_total=" << aiors_totals.fault_samples
+     << " aiors_degraded_s_total=" << seconds(aiors_totals.degraded_s)
+     << " aiors_fault_s_total=" << seconds(aiors_totals.fault_s)
+     << " aiors_psu_a_state_change_evt_total="
+     << aiors_totals.psu_a_state_changes
+     << " aiors_psu_b_state_change_evt_total="
+     << aiors_totals.psu_b_state_changes
+     << " aiors_psu_a_on_s_total=" << seconds(aiors_totals.psu_a_on_s)
+     << " aiors_psu_a_off_s_total=" << seconds(aiors_totals.psu_a_off_s)
+     << " aiors_psu_b_on_s_total=" << seconds(aiors_totals.psu_b_on_s)
+     << " aiors_psu_b_off_s_total=" << seconds(aiors_totals.psu_b_off_s)
+     << " aiors_psu_a_fault_evt_total=" << aiors_totals.psu_a_fault_events
+     << " aiors_psu_b_fault_evt_total=" << aiors_totals.psu_b_fault_events
+     << " aiors_psu_a_fault_s_total=" << seconds(aiors_totals.psu_a_fault_s)
+     << " aiors_psu_b_fault_s_total=" << seconds(aiors_totals.psu_b_fault_s)
+     << " aiors_psu_a_energy_coverage_s_total="
+     << seconds(aiors_totals.psu_a_energy_coverage_s)
+     << " aiors_psu_b_energy_coverage_s_total="
+     << seconds(aiors_totals.psu_b_energy_coverage_s);
+
+  auto append_integrated_total = [&](const char* name, double value,
+                                     double coverage_s)
+  {
+    os << " " << name << "=";
+    if (coverage_s > 0.0)
+      os << std::setprecision(6) << value;
+    else
+      os << "na";
+  };
+  append_integrated_total("aiors_psu_a_energy_wh_total",
+      aiors_totals.psu_a_energy_wh,
+      aiors_totals.psu_a_energy_coverage_s);
+  append_integrated_total("aiors_psu_b_energy_wh_total",
+      aiors_totals.psu_b_energy_wh,
+      aiors_totals.psu_b_energy_coverage_s);
+  append_integrated_total("aiors_psu_a_charge_ah_total",
+      aiors_totals.psu_a_charge_ah,
+      aiors_totals.psu_a_energy_coverage_s);
+  append_integrated_total("aiors_psu_b_charge_ah_total",
+      aiors_totals.psu_b_charge_ah,
+      aiors_totals.psu_b_energy_coverage_s);
+
   os << " aiors_samples_ok_1h=" << one_hour.success_samples
      << " aiors_samples_failed_1h=" << one_hour.failure_samples
      << " aiors_state_coverage_s_1h=" << seconds(one_hour.coverage_s)
@@ -1272,6 +1431,17 @@ void SvxStats::appendAiorsStats(std::ostringstream& os, double now_s) const
     }
   };
   append_status_window(one_hour, "1h");
+
+  for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
+  {
+    const StatusAgg& total = aiors_totals.statuses[status];
+    os << " " << status_names[status] << "_fault_evt_total="
+       << total.fault_events
+       << " " << status_names[status] << "_fault_samples_total="
+       << total.fault_samples
+       << " " << status_names[status] << "_fault_s_total="
+       << seconds(total.fault_s);
+  }
 
   os << " aiors_samples_ok_24h=" << one_day.success_samples
      << " aiors_samples_failed_24h=" << one_day.failure_samples
@@ -1460,6 +1630,43 @@ void SvxStats::loadPersistedTotals()
     else if (k == "frn_rx_bytes_total") parse_u64(frn_rx_bytes_total);
     else if (k == "frn_link_up_total") parse_u64(frn_link_up_total);
     else if (k == "frn_link_down_total") parse_u64(frn_link_down_total);
+    else if (k == "aiors_samples_ok_total") parse_u64(aiors_totals.success_samples);
+    else if (k == "aiors_samples_failed_total") parse_u64(aiors_totals.failure_samples);
+    else if (k == "aiors_restart_evt_total") parse_u64(aiors_totals.restart_events);
+    else if (k == "aiors_degraded_samples_total") parse_u64(aiors_totals.degraded_samples);
+    else if (k == "aiors_fault_samples_total") parse_u64(aiors_totals.fault_samples);
+    else if (k == "aiors_psu_a_state_change_evt_total") parse_u64(aiors_totals.psu_a_state_changes);
+    else if (k == "aiors_psu_b_state_change_evt_total") parse_u64(aiors_totals.psu_b_state_changes);
+    else if (k == "aiors_psu_a_fault_evt_total") parse_u64(aiors_totals.psu_a_fault_events);
+    else if (k == "aiors_psu_b_fault_evt_total") parse_u64(aiors_totals.psu_b_fault_events);
+    else if (k == "aiors_state_coverage_s_total") parse_d(aiors_totals.state_coverage_s);
+    else if (k == "aiors_energy_coverage_s_total") parse_d(aiors_totals.energy_coverage_s);
+    else if (k == "aiors_psu_a_energy_coverage_s_total") parse_d(aiors_totals.psu_a_energy_coverage_s);
+    else if (k == "aiors_psu_b_energy_coverage_s_total") parse_d(aiors_totals.psu_b_energy_coverage_s);
+    else if (k == "aiors_psu_a_energy_wh_total") parse_d(aiors_totals.psu_a_energy_wh);
+    else if (k == "aiors_psu_b_energy_wh_total") parse_d(aiors_totals.psu_b_energy_wh);
+    else if (k == "aiors_psu_a_charge_ah_total") parse_d(aiors_totals.psu_a_charge_ah);
+    else if (k == "aiors_psu_b_charge_ah_total") parse_d(aiors_totals.psu_b_charge_ah);
+    else if (k == "aiors_psu_a_on_s_total") parse_d(aiors_totals.psu_a_on_s);
+    else if (k == "aiors_psu_a_off_s_total") parse_d(aiors_totals.psu_a_off_s);
+    else if (k == "aiors_psu_b_on_s_total") parse_d(aiors_totals.psu_b_on_s);
+    else if (k == "aiors_psu_b_off_s_total") parse_d(aiors_totals.psu_b_off_s);
+    else if (k == "aiors_psu_a_fault_s_total") parse_d(aiors_totals.psu_a_fault_s);
+    else if (k == "aiors_psu_b_fault_s_total") parse_d(aiors_totals.psu_b_fault_s);
+    else if (k == "aiors_degraded_s_total") parse_d(aiors_totals.degraded_s);
+    else if (k == "aiors_fault_s_total") parse_d(aiors_totals.fault_s);
+    else if (k == "aiors_sa818_a_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_events);
+    else if (k == "aiors_sa818_a_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_samples);
+    else if (k == "aiors_sa818_a_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_s);
+    else if (k == "aiors_sa818_b_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_events);
+    else if (k == "aiors_sa818_b_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_samples);
+    else if (k == "aiors_sa818_b_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_s);
+    else if (k == "aiors_cm108_a_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_events);
+    else if (k == "aiors_cm108_a_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_samples);
+    else if (k == "aiors_cm108_a_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_s);
+    else if (k == "aiors_cm108_b_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_events);
+    else if (k == "aiors_cm108_b_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_samples);
+    else if (k == "aiors_cm108_b_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_s);
 
     // Legacy keys (older experiments)
     else if (k == "rf_tx_hours_total") { double h=0; parse_d(h); rf_tx_total.sec = h * 3600.0; }
@@ -1480,6 +1687,7 @@ void SvxStats::savePersistedTotals()
   if (!o.is_open())
     return;
 
+  o << std::setprecision(17);
   o << "rf_tx_s_total=" << rf_tx_total.sec << "\n";
   o << "rf_tx_evt_total=" << rf_tx_total.evt << "\n";
   o << "rf_rx_s_total=" << rf_rx_total.sec << "\n";
@@ -1500,4 +1708,41 @@ void SvxStats::savePersistedTotals()
   o << "frn_rx_bytes_total=" << frn_rx_bytes_total << "\n";
   o << "frn_link_up_total=" << frn_link_up_total << "\n";
   o << "frn_link_down_total=" << frn_link_down_total << "\n";
+  o << "aiors_samples_ok_total=" << aiors_totals.success_samples << "\n";
+  o << "aiors_samples_failed_total=" << aiors_totals.failure_samples << "\n";
+  o << "aiors_restart_evt_total=" << aiors_totals.restart_events << "\n";
+  o << "aiors_degraded_samples_total=" << aiors_totals.degraded_samples << "\n";
+  o << "aiors_fault_samples_total=" << aiors_totals.fault_samples << "\n";
+  o << "aiors_psu_a_state_change_evt_total=" << aiors_totals.psu_a_state_changes << "\n";
+  o << "aiors_psu_b_state_change_evt_total=" << aiors_totals.psu_b_state_changes << "\n";
+  o << "aiors_psu_a_fault_evt_total=" << aiors_totals.psu_a_fault_events << "\n";
+  o << "aiors_psu_b_fault_evt_total=" << aiors_totals.psu_b_fault_events << "\n";
+  o << "aiors_state_coverage_s_total=" << aiors_totals.state_coverage_s << "\n";
+  o << "aiors_energy_coverage_s_total=" << aiors_totals.energy_coverage_s << "\n";
+  o << "aiors_psu_a_energy_coverage_s_total=" << aiors_totals.psu_a_energy_coverage_s << "\n";
+  o << "aiors_psu_b_energy_coverage_s_total=" << aiors_totals.psu_b_energy_coverage_s << "\n";
+  o << "aiors_psu_a_energy_wh_total=" << aiors_totals.psu_a_energy_wh << "\n";
+  o << "aiors_psu_b_energy_wh_total=" << aiors_totals.psu_b_energy_wh << "\n";
+  o << "aiors_psu_a_charge_ah_total=" << aiors_totals.psu_a_charge_ah << "\n";
+  o << "aiors_psu_b_charge_ah_total=" << aiors_totals.psu_b_charge_ah << "\n";
+  o << "aiors_psu_a_on_s_total=" << aiors_totals.psu_a_on_s << "\n";
+  o << "aiors_psu_a_off_s_total=" << aiors_totals.psu_a_off_s << "\n";
+  o << "aiors_psu_b_on_s_total=" << aiors_totals.psu_b_on_s << "\n";
+  o << "aiors_psu_b_off_s_total=" << aiors_totals.psu_b_off_s << "\n";
+  o << "aiors_psu_a_fault_s_total=" << aiors_totals.psu_a_fault_s << "\n";
+  o << "aiors_psu_b_fault_s_total=" << aiors_totals.psu_b_fault_s << "\n";
+  o << "aiors_degraded_s_total=" << aiors_totals.degraded_s << "\n";
+  o << "aiors_fault_s_total=" << aiors_totals.fault_s << "\n";
+  o << "aiors_sa818_a_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_events << "\n";
+  o << "aiors_sa818_a_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_samples << "\n";
+  o << "aiors_sa818_a_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_s << "\n";
+  o << "aiors_sa818_b_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_events << "\n";
+  o << "aiors_sa818_b_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_samples << "\n";
+  o << "aiors_sa818_b_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_s << "\n";
+  o << "aiors_cm108_a_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_events << "\n";
+  o << "aiors_cm108_a_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_samples << "\n";
+  o << "aiors_cm108_a_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_s << "\n";
+  o << "aiors_cm108_b_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_events << "\n";
+  o << "aiors_cm108_b_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_samples << "\n";
+  o << "aiors_cm108_b_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_s << "\n";
 }

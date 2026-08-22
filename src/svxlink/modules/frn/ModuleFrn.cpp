@@ -53,6 +53,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <AsyncAudioJitterFifo.h>
 #include <AsyncAudioDecimator.h>
 #include <AsyncAudioInterpolator.h>
+#include <config.h>
 
 
 /****************************************************************************
@@ -596,6 +597,7 @@ static inline const std::vector<std::string>& supportedRunCmds()
   static const std::vector<std::string> cmds =
   {
     "get stats",
+    "get version",
     "get psu a",
     "get psu b",
     "get psu all",
@@ -677,10 +679,21 @@ bool ModuleFrn::parseAndAuthorizeCmd(const std::string& from_id,
 void ModuleFrn::sendCmdReplyChunked(const std::string& to_id,
                                     const std::string& reply)
 {
-  // Sanitize: remove CR/LF and other control chars (keep tab)
-  std::string s = reply;
-  s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
-  s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+  // FRN text messages are single-line, so retain CLI rows as separated fields.
+  std::string s;
+  std::istringstream input(reply);
+  std::string line;
+  while (std::getline(input, line))
+  {
+    line = trim_copy(line);
+    if (line.empty())
+      continue;
+    if (!s.empty())
+      s += "; ";
+    s += line;
+  }
+
+  // Remove any remaining control characters (keep tab).
   s.erase(std::remove_if(s.begin(), s.end(),
                          [](unsigned char c){
                            return (c < 0x20 && c != '\t') || c == 0x7F;
@@ -845,7 +858,8 @@ if (cmd == "get stats")
   cmd_start_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
 
-  std::string cmdline = aiorsctl_path + " " + cmd;
+  const std::string aiors_cmd = (cmd == "get version") ? "version" : cmd;
+  std::string cmdline = aiorsctl_path + " " + aiors_cmd;
   cmd_exec = new Async::Exec(cmdline);
   cmd_exec->setTimeout(3); // seconds
 
@@ -862,7 +876,7 @@ if (cmd == "get stats")
       });
 
   cmd_exec->exited.connect(
-      [this](void)
+      [this, cmd](void)
       {
         std::string out = trim_copy(cmd_stdout);
         std::string errout = trim_copy(cmd_stderr);
@@ -870,6 +884,14 @@ if (cmd == "get stats")
         if (reply.empty())
         {
           reply = "OK";
+        }
+
+        if (cmd == "get version")
+        {
+          std::ostringstream version_reply;
+          version_reply << "svxlink " << SVXLINK_VERSION
+                        << "\n" << reply;
+          reply = version_reply.str();
         }
 
         sendCmdReplyChunked(cmd_from_id, reply);

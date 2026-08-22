@@ -1,23 +1,24 @@
 # AIORS FRN RunCmd Diagnostics Report
 
-Generated from the current SvxLink workspace on 2026-08-17.
+Generated from the current SvxLink and AIORS workspaces on 2026-08-23.
 
 ## Summary
 
 The FRN messages module implements a private text-message command bridge named `RunCmd`. Incoming FRN text messages are parsed by `QsoFrn`, emitted to `ModuleFrn`, validated against a small allowlist, and then answered with FRN private text messages prefixed with `CmdReply:`.
 
-There are six allowlisted RunCmd commands:
+There are seven allowlisted RunCmd commands:
 
 | RunCmd command | Implemented behavior | Data source |
 | --- | --- | --- |
 | `help` | Internal reply listing the supported commands. | `ModuleFrn.cpp` allowlist |
 | `get stats` | Internal SvxLink diagnostics report, split into numbered FRN text replies. | `SvxStats` counters |
+| `get version` | Reports the embedded SvxLink version and the version returned by `aiorsctl version`. | SvxLink build metadata and AIORS controller |
 | `get psu a` | Runs external `aiorsctl get psu a`. | AIORS controller via `aiorsctl` |
 | `get psu b` | Runs external `aiorsctl get psu b`. | AIORS controller via `aiorsctl` |
 | `get psu all` | Runs external `aiorsctl get psu all`. | AIORS controller via `aiorsctl` |
 | `get temp all` | Runs external `aiorsctl get temp all`. | AIORS controller via `aiorsctl` |
 
-The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It handles AIORS runtime integration by wrapping SvxLink RX/TX Tcl event procedures and calling `aiorsctl set led ...`. The PSU and temperature RunCmd commands use the same external AIORS control entry point, `aiorsctl`, but the actual sensor-reading implementation is not present in this workspace.
+The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It handles AIORS runtime integration by wrapping SvxLink RX/TX Tcl event procedures and calling `aiorsctl set led ...`. Version, PSU, and temperature RunCmd commands use the external AIORS control entry point, `aiorsctl`.
 
 ## FRN Message Flow
 
@@ -66,7 +67,7 @@ Important guardrails:
 `help` is handled internally by `ModuleFrn`. It returns the current command allowlist:
 
 ```text
-Supported commands: get stats; get psu a; get psu b; get psu all; get temp all; help;
+Supported commands: get stats; get version; get psu a; get psu b; get psu all; get temp all; help;
 ```
 
 The reply is sent through `sendCmdReplyChunked`, so it is prefixed with `CmdReply:` and chunked if it ever grows beyond the FRN text message size limit.
@@ -105,7 +106,24 @@ The current stats groups are:
 | `RF RX 1h` | event count, total seconds, min/max seconds, duty percentage, total RF RX hours |
 | `CMD 1h` | accepted commands, rejected commands, auth failures, broadcast attempts, average command execution time, max command execution time |
 
-Note: `SvxStats` has fields for FRN link up/down events. In this workspace I found the `onFrnLinkUp()` and `onFrnLinkDown()` methods, but did not find call sites that invoke them. Unless those calls exist outside this checkout or are added later, those link counters may remain zero.
+FRN link transitions call `SvxStats::onFrnLinkUp()` and `SvxStats::onFrnLinkDown()`, so the corresponding rolling and lifetime counters are active.
+
+### `get version`
+
+`get version` combines the version compiled into SvxLink with the output of:
+
+```text
+<AIORSCTL_PATH> version
+```
+
+The FRN response is a single readable line when it fits within the protocol limit:
+
+```text
+CmdReply: svxlink 1.9.99.36@25.05.1-95-g3dc7d4f6; aiorsd <AIORS full version>
+```
+
+The periodic `STATS` record also contains `svxlink_software_version` and
+`svxlink_software_revision`, matching the AIORS software identity fields.
 
 ### `get psu a`
 
@@ -248,4 +266,3 @@ The relevant defaults are:
 | AIORS TX LED command | `events.d/local/aiors.tcl:194` |
 | AIORS TX hook | `events.d/local/aiors.tcl:424` |
 | AIORS RX hook | `events.d/local/aiors.tcl:466` |
-

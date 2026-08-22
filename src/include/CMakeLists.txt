@@ -23,7 +23,7 @@ foreach(version ${versions})
 endforeach(version)
 
 execute_process(
-  COMMAND git describe --tags
+  COMMAND git describe --tags --dirty
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   OUTPUT_VARIABLE PROJECT_VERSION
   OUTPUT_STRIP_TRAILING_WHITESPACE
