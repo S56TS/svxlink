@@ -29,6 +29,19 @@ prebuilt/arm64/runtime-dependencies.txt
 prebuilt/arm64/SHA256SUMS
 ```
 
+The archive is normalized for Debian 13's usrmerged filesystem: systemd units
+are installed under `/usr/lib/systemd/system`, file modes are deterministic,
+and no top-level `/lib`, `/bin`, or `/sbin` tree is packaged. Because Debian 13
+ships a newer JSONCPP SONAME than the build sysroot, the exact JSONCPP runtime
+used by SvxLink is bundled in a private RPATH directory. SvxLink's GPIO support
+is linked against Debian 13's native libgpiod v2 ABI (`libgpiod.so.3`).
+
+The intermediate CMake build tree defaults to WSL's native cache directory,
+not the Windows-mounted repository. This avoids NTFS/DrvFS timestamp skew and
+permission behavior while the finished bundle is still written to
+`prebuilt/arm64`. Set `SVXLINK_BUILD_DIR` only when a different native Linux
+build location is required.
+
 The public installer in `S56TS/aiors_deploy` downloads the signed combined
 release, verifies this bundle, and installs it without source-repository access.
 Do not deploy only `/usr/bin/svxlink`; the logic cores, modules, project

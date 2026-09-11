@@ -5,7 +5,7 @@ namespace eval ::AIORS::FrnAutoStart {
   if {![info exists enabled]} { variable enabled 1 }
   if {![info exists timeout_sec]} { variable timeout_sec 60 }
   if {![info exists timer_sec]} { variable timer_sec 60 }
-  if {![info exists dtmf_cmd]} { variable dtmf_cmd "2#" }
+  if {![info exists dtmf_cmd]} { variable dtmf_cmd "7#" }
   if {![info exists dtmf_ctrl_pty]} { variable dtmf_ctrl_pty "" }
   if {![info exists registered]} { variable registered 0 }
 }
@@ -72,7 +72,13 @@ proc ::AIORS::FrnAutoStart::_load_config {} {
   set enabled [_is_true [_cfg_get "AIORS_FRN_AUTOSTART_ENABLE" "1"]]
   set timeout_sec $raw_timeout
   set timer_sec $timeout_sec
-  set dtmf_cmd [_cfg_get "AIORS_FRN_AUTOSTART_DTMF" "2#"]
+  set frn_module_id "7"
+  if {[info commands getConfigValue] ne ""} {
+    if {[catch {set frn_module_id [getConfigValue "ModuleFrn" "ID" "7"]}]} {
+      set frn_module_id "7"
+    }
+  }
+  set dtmf_cmd [_cfg_get "AIORS_FRN_AUTOSTART_DTMF" "${frn_module_id}#"]
   set dtmf_ctrl_pty [_cfg_get "DTMF_CTRL_PTY" ""]
 }
 
