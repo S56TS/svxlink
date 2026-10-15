@@ -115,6 +115,17 @@ SvxStats::SvxStats()
   idx = 0;
 }
 
+SvxStats::~SvxStats()
+{
+  {
+    std::lock_guard<std::mutex> lock(stats_writer_mutex);
+    stats_writer_stop = true;
+  }
+  stats_writer_ready.notify_one();
+  if (stats_writer.joinable())
+    stats_writer.join();
+}
+
 void SvxStats::start()
 {
   start(60);
@@ -125,6 +136,7 @@ void SvxStats::start(uint32_t interval_s)
   if (started)
     return;
   started = true;
+  stats_writer = std::thread(&SvxStats::statsWriterLoop, this);
 
   stats_interval_ms = (interval_s == 0 ? 60000U : (uint32_t)(interval_s * 1000U));
   // NOTE: Async::Timer defaults to TYPE_ONESHOT. We want periodic stats.
@@ -163,6 +175,13 @@ void SvxStats::rotateBuckets(uint64_t now_minute)
     idx = (idx + 1) % NBUCKET;
     buckets[idx] = Bucket{};
     buckets[idx].minute = cur_minute;
+  }
+  for (auto it = user_last_seen_minute.begin(); it != user_last_seen_minute.end(); )
+  {
+    if (it->second + NBUCKET <= now_minute)
+      it = user_last_seen_minute.erase(it);
+    else
+      ++it;
   }
 }
 
@@ -749,7 +768,15 @@ void SvxStats::onTick(Async::Timer* /*t*/)
   {
     std::cout << line << std::endl;
   }
-  writeStatsReport(line);
+  {
+    std::lock_guard<std::mutex> lock(stats_writer_mutex);
+    stats_snapshot_line = line;
+    stats_snapshot_pending = true;
+    if (stats_history_pending.size() >= 64)
+      stats_history_pending.pop_front();
+    stats_history_pending.push_back(line);
+  }
+  stats_writer_ready.notify_one();
   savePersistedTotals();
 }
 
@@ -1572,12 +1599,56 @@ void SvxStats::writeStatsReport(const std::string& line)
     }
   }
 
-  if (!history_path.empty())
+}
+
+void SvxStats::statsWriterLoop()
+{
+  for (;;)
   {
-    std::ofstream o(history_path.c_str(), std::ios::out | std::ios::app);
-    if (o.is_open())
+    std::string snapshot;
+    std::string persisted;
+    std::deque<std::string> history;
+    bool write_snapshot = false;
+    bool write_persisted = false;
     {
-      o << line << "\n";
+      std::unique_lock<std::mutex> lock(stats_writer_mutex);
+      stats_writer_ready.wait(lock, [this] {
+        return stats_writer_stop || stats_snapshot_pending ||
+               stats_persist_pending || !stats_history_pending.empty();
+      });
+      if (stats_writer_stop && !stats_snapshot_pending &&
+          !stats_persist_pending && stats_history_pending.empty())
+        return;
+      write_snapshot = stats_snapshot_pending;
+      write_persisted = stats_persist_pending;
+      snapshot.swap(stats_snapshot_line);
+      persisted.swap(stats_persist_text);
+      history.swap(stats_history_pending);
+      stats_snapshot_pending = false;
+      stats_persist_pending = false;
+    }
+    if (write_snapshot)
+      writeStatsReport(snapshot);
+    if (!history.empty() && !history_path.empty())
+    {
+      std::ofstream o(history_path.c_str(), std::ios::out | std::ios::app);
+      for (const auto& line : history)
+        o << line << "\n";
+    }
+    if (write_persisted && !persist_path.empty())
+    {
+      const std::string tmp_path = persist_path + ".tmp";
+      bool written = false;
+      {
+        std::ofstream o(tmp_path.c_str(), std::ios::out | std::ios::trunc);
+        if (o.is_open())
+        {
+          o << persisted;
+          written = o.good();
+        }
+      }
+      if (written)
+        std::rename(tmp_path.c_str(), persist_path.c_str());
     }
   }
 }
@@ -1683,9 +1754,7 @@ void SvxStats::savePersistedTotals()
   if (persist_path.empty())
     return;
 
-  std::ofstream o(persist_path.c_str(), std::ios::out | std::ios::trunc);
-  if (!o.is_open())
-    return;
+  std::ostringstream o;
 
   o << std::setprecision(17);
   o << "rf_tx_s_total=" << rf_tx_total.sec << "\n";
@@ -1745,4 +1814,10 @@ void SvxStats::savePersistedTotals()
   o << "aiors_cm108_b_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_events << "\n";
   o << "aiors_cm108_b_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_samples << "\n";
   o << "aiors_cm108_b_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_s << "\n";
+  {
+    std::lock_guard<std::mutex> lock(stats_writer_mutex);
+    stats_persist_text = o.str();
+    stats_persist_pending = true;
+  }
+  stats_writer_ready.notify_one();
 }

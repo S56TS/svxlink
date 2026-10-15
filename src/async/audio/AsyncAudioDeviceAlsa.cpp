@@ -416,6 +416,13 @@ void AudioDeviceAlsa::audioReadHandler(FdWatch *watch, unsigned short revents)
   assert(rec_handle != 0);
   assert((mode() == MODE_RD) || (mode() == MODE_RDWR));
   
+  if (revents & (POLLERR | POLLHUP | POLLNVAL))
+  {
+    setDeviceError();
+    watch->setEnabled(false);
+    return;
+  }
+
   if (!(revents & POLLIN))
   {
     return;
@@ -436,6 +443,7 @@ void AudioDeviceAlsa::audioReadHandler(FdWatch *watch, unsigned short revents)
   {
     if (!startCapture(rec_handle))
     {
+      setDeviceError();
       watch->setEnabled(false);
     }
     return;

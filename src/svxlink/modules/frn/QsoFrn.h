@@ -39,6 +39,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <string>
 #include <vector>
 #include <deque>
+#include <array>
 #include <sigc++/sigc++.h>
 
 
@@ -571,6 +572,8 @@ public:
     static const int        CON_TIMEOUT_TIME        = 30000;
     static const int        RX_TIMEOUT_TIME         = 1000;
     static const int        KEEPALIVE_TIMEOUT_TIME  = 5000;
+    static const int        TX_GRANT_TIMEOUT_TIME    = 10000;
+    static const int        TX_GRANT_BUFFER_FRAMES   = 50;
 
     static const int        RECONNECT_TIMEOUT_TIME  = 5*1000;
     static const int        RECONNECT_MAX_TIMEOUT   = 2*60*1000;
@@ -581,6 +584,7 @@ public:
     Async::TcpClient<>* tcp_client;
     Async::Timer *      rx_timeout_timer;
     Async::Timer *      con_timeout_timer;
+    Async::Timer *      tx_wait_timer;
     Async::Timer *      keepalive_timer;
     struct PendingTm
     {
@@ -605,6 +609,8 @@ public:
     short               receive_buffer[BUFFER_SIZE];
     short               send_buffer[BUFFER_SIZE];
     int                 send_buffer_cnt;
+    std::deque<std::array<short, BUFFER_SIZE>> pending_tx_frames;
+    bool                tx_end_pending;
     gsm                 gsmh_tx;
     gsm                 gsmh_rx;
     int                 lines_to_read;

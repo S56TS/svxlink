@@ -1,0 +1,15 @@
+# Create one block per node. Keep the MQTT username and topic node ID equal.
+user S5RPTAIORS
+topic write frn/aiors/v1/S5RPTAIORS/status
+topic write frn/aiors/v1/S5RPTAIORS/telemetry
+topic write frn/aiors/v1/S5RPTAIORS/events
+topic read frn/aiors/v1/S5RPTAIORS/command/request
+topic write frn/aiors/v1/S5RPTAIORS/command/response
+
+# The FRN server application receives telemetry and can issue commands.
+user frn-ingest
+topic read frn/aiors/v1/+/status
+topic read frn/aiors/v1/+/telemetry
+topic read frn/aiors/v1/+/events
+topic read frn/aiors/v1/+/command/response
+topic write frn/aiors/v1/+/command/request

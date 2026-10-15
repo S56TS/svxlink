@@ -35,6 +35,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  ****************************************************************************/
 #include <cassert>
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <sigc++/bind.h>
@@ -195,11 +196,13 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   , tcp_client(new TcpClient<>(TCP_BUFFER_SIZE))
   , rx_timeout_timer(new Timer(RX_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , con_timeout_timer(new Timer(CON_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
+  , tx_wait_timer(new Timer(TX_GRANT_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
   , keepalive_timer(new Timer(KEEPALIVE_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , reconnect_timer(new Timer(RECONNECT_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
   , state(STATE_DISCONNECTED)
   , connect_retry_cnt(0)
   , send_buffer_cnt(0)
+  , tx_end_pending(false)
   , gsmh_tx(0)
   , gsmh_rx(0)
   , lines_to_read(-1)
@@ -341,6 +344,9 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   con_timeout_timer->expired.connect(
       mem_fun(*this, &QsoFrn::onConnectTimeout));
 
+  tx_wait_timer->setEnable(false);
+  tx_wait_timer->expired.connect(mem_fun(*this, &QsoFrn::onTxWaitTimeout));
+
   rx_timeout_timer->setEnable(false);
   rx_timeout_timer->expired.connect(
       mem_fun(*this, &QsoFrn::onRxTimeout));
@@ -369,6 +375,9 @@ QsoFrn::~QsoFrn(void)
 
   delete con_timeout_timer;
   con_timeout_timer = 0;
+
+  delete tx_wait_timer;
+  tx_wait_timer = 0;
 
   delete rx_timeout_timer;
   rx_timeout_timer = 0;
@@ -429,6 +438,10 @@ void QsoFrn::disconnect(void)
 {
   reconnect_timer->setEnable(false);
   rx_timeout_timer->setEnable(false);
+  tx_wait_timer->setEnable(false);
+  tx_end_pending = false;
+  send_buffer_cnt = 0;
+  pending_tx_frames.clear();
   if (tm_out_timer != 0)
   {
     tm_out_timer->setEnable(false);
@@ -488,6 +501,9 @@ int QsoFrn::writeSamples(const float *samples, int count)
 {
   //cout << __FUNCTION__ << " " << count << endl;
 
+  if (tx_end_pending)
+    return count;
+
   if (state == STATE_IDLE)
   {
     if (!initGsmWav49(gsmh_tx, "TX"))
@@ -495,6 +511,7 @@ int QsoFrn::writeSamples(const float *samples, int count)
       return 0;
     }
     send_buffer_cnt = 0;
+    pending_tx_frames.clear();
     if (!sendRequest(RQ_TX0))
     {
       if (opt_frn_debug)
@@ -502,6 +519,8 @@ int QsoFrn::writeSamples(const float *samples, int count)
       return 0;
     }
     setState(STATE_TX_AUDIO_WAITING);
+    tx_wait_timer->setEnable(true);
+    tx_wait_timer->reset();
   }
 
   int samples_read = 0;
@@ -528,8 +547,13 @@ int QsoFrn::writeSamples(const float *samples, int count)
       }
       else
       {
-        samples_read = count;
-        break;
+        std::array<short, BUFFER_SIZE> frame;
+        std::copy(send_buffer, send_buffer + BUFFER_SIZE, frame.begin());
+        // Keep at most ten seconds while waiting for the FRN grant.
+        if (pending_tx_frames.size() >= TX_GRANT_BUFFER_FRAMES)
+          pending_tx_frames.pop_front();
+        pending_tx_frames.push_back(frame);
+        send_buffer_cnt = 0;
       }
     }
   }
@@ -553,6 +577,11 @@ void QsoFrn::flushSamples(void)
       send_buffer_cnt = 0;
     }
     sendRequest(RQ_RX0);
+  }
+  else if (state == STATE_TX_AUDIO_WAITING || state == STATE_TX_AUDIO_APPROVED)
+  {
+    // Retain the buffered audio until the grant's client index is complete.
+    tx_end_pending = true;
   }
   sourceAllSamplesFlushed();
 }
@@ -719,6 +748,10 @@ void QsoFrn::scheduleReconnect(const std::string& reason)
   setState(STATE_DISCONNECTED);
   con_timeout_timer->setEnable(false);
   rx_timeout_timer->setEnable(false);
+  tx_wait_timer->setEnable(false);
+  tx_end_pending = false;
+  send_buffer_cnt = 0;
+  pending_tx_frames.clear();
   if (tm_out_timer != 0)
   {
     tm_out_timer->setEnable(false);
@@ -1046,6 +1079,10 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
     case DT_IDLE:
       if (sendRequest(RQ_P))
       {
+        tx_wait_timer->setEnable(false);
+        tx_end_pending = false;
+        send_buffer_cnt = 0;
+        pending_tx_frames.clear();
         setState(STATE_IDLE);
       }
       break;
@@ -1247,6 +1284,10 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
   bool needs_reconnect = false;
   std::string reconnect_reason;
 
+  tx_wait_timer->setEnable(false);
+  tx_end_pending = false;
+  send_buffer_cnt = 0;
+  pending_tx_frames.clear();
   setState(STATE_DISCONNECTED);
 
   con_timeout_timer->setEnable(false);
@@ -1341,8 +1382,31 @@ int QsoFrn::onDataReceived(TcpConnection *con, void *data, int len)
 
       case STATE_TX_AUDIO_APPROVED:
         if (remaining_bytes >= CLIENT_INDEX_SIZE)
+        {
           bytes_read += CLIENT_INDEX_SIZE;
-        setState(STATE_TX_AUDIO);
+          tx_wait_timer->setEnable(false);
+          setState(STATE_TX_AUDIO);
+          while (!pending_tx_frames.empty() && state == STATE_TX_AUDIO)
+          {
+            std::array<short, BUFFER_SIZE> frame = pending_tx_frames.front();
+            pending_tx_frames.pop_front();
+            sendVoiceData(frame.data(), BUFFER_SIZE);
+          }
+          if (state != STATE_TX_AUDIO)
+            break;
+          if (tx_end_pending)
+          {
+            if (send_buffer_cnt > 0)
+            {
+              memset(send_buffer + send_buffer_cnt, 0,
+                  sizeof(send_buffer) - sizeof(*send_buffer) * send_buffer_cnt);
+              sendVoiceData(send_buffer, BUFFER_SIZE);
+              send_buffer_cnt = 0;
+            }
+            sendRequest(RQ_RX0);
+            tx_end_pending = false;
+          }
+        }
         break;
 
       case STATE_TX_AUDIO:
@@ -1397,6 +1461,14 @@ void QsoFrn::onConnectTimeout(Timer *timer)
     disconnect();
     reconnect();
   }
+}
+
+
+void QsoFrn::onTxWaitTimeout(Timer *timer)
+{
+  tx_wait_timer->setEnable(false);
+  if (state == STATE_TX_AUDIO_WAITING || state == STATE_TX_AUDIO_APPROVED)
+    forceReconnect("FRN transmit grant timed out");
 }
 
 void QsoFrn::onRxTimeout(Timer *timer)

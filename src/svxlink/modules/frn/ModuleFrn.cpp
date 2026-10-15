@@ -883,7 +883,13 @@ if (cmd == "get stats")
         std::string reply = out.empty() ? errout : out;
         if (reply.empty())
         {
-          reply = "OK";
+          if (cmd_exec->ifExited() && cmd_exec->exitStatus() == 0)
+            reply = "OK";
+          else if (cmd_exec->ifExited())
+            reply = "ERR: command exited with status " +
+                    std::to_string(cmd_exec->exitStatus());
+          else
+            reply = "ERR: command was terminated";
         }
 
         if (cmd == "get version")
@@ -905,6 +911,12 @@ if (cmd == "get stats")
         cmd_busy = false;
       });
 
-  cmd_exec->run();
+  if (!cmd_exec->run())
+  {
+    delete cmd_exec;
+    cmd_exec = 0;
+    cmd_busy = false;
+    sendCmdReplyChunked(from_id, "ERR: failed to start command");
+  }
 }
 

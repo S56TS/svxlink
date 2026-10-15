@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <cstdint>
 #include <iosfwd>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 namespace Async { class Exec; class Timer; }
 
@@ -81,6 +84,7 @@ public:
 
 private:
   SvxStats();
+  ~SvxStats();
   SvxStats(const SvxStats&) = delete;
   SvxStats& operator=(const SvxStats&) = delete;
 
@@ -90,6 +94,7 @@ private:
   uint64_t uptimeSeconds() const;
   int64_t linuxUptimeSeconds() const;
   void writeStatsReport(const std::string& line);
+  void statsWriterLoop();
   void collectAiorsDiagnostics();
   void onAiorsDiagnosticsExited();
   void recordAiorsFailure(const std::string& reason);
@@ -289,6 +294,15 @@ private:
   std::string history_path;
   bool log_to_stdout = true;
   bool started = false;
+  std::thread stats_writer;
+  std::mutex stats_writer_mutex;
+  std::condition_variable stats_writer_ready;
+  bool stats_writer_stop = false;
+  bool stats_snapshot_pending = false;
+  bool stats_persist_pending = false;
+  std::string stats_snapshot_line;
+  std::string stats_persist_text;
+  std::deque<std::string> stats_history_pending;
 
   // AIORS diagnostics collection and rolling 24-hour telemetry history.
   bool aiors_diagnostics_enabled = false;

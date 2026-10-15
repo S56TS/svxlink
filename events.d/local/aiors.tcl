@@ -176,6 +176,64 @@ proc ::AIORS::_led_ch {id} {
   return "a"
 }
 
+proc ::AIORS::_led_start {key} {
+  variable led_desired
+  variable led_sent
+  variable led_pipe
+  variable led_timeout
+  if {[info exists led_pipe($key)] || ![info exists led_desired($key)]} { return }
+  if {[info exists led_sent($key)] && $led_sent($key) eq $led_desired($key)} { return }
+  if {$::AIORS::aiorsctl eq ""} { return }
+
+  lassign [split $key ,] ch kind
+  set state $led_desired($key)
+  set command [list $::AIORS::aiorsctl set led $ch $kind $state]
+  if {[catch {open "|$command" r} pipe]} {
+    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: LED process failed to start: $pipe" }
+    return
+  }
+  fconfigure $pipe -blocking 0
+  set led_pipe($key) $pipe
+  set led_sent($key) $state
+  fileevent $pipe readable [list ::AIORS::_led_readable $key $pipe]
+  set led_timeout($key) [after 2500 [list ::AIORS::_led_timeout $key $pipe]]
+}
+
+proc ::AIORS::_led_readable {key pipe} {
+  variable led_pipe
+  variable led_timeout
+  variable led_sent
+  if {![info exists led_pipe($key)] || $led_pipe($key) ne $pipe} { return }
+  catch {read $pipe}
+  if {![eof $pipe]} { return }
+  fileevent $pipe readable {}
+  after cancel $led_timeout($key)
+  unset led_timeout($key)
+  unset led_pipe($key)
+  if {[catch {close $pipe} err]} {
+    unset -nocomplain led_sent($key)
+    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: LED update failed: $err" }
+    after 1000 [list ::AIORS::_led_start $key]
+  } else {
+    after 0 [list ::AIORS::_led_start $key]
+  }
+}
+
+proc ::AIORS::_led_timeout {key pipe} {
+  variable led_pipe
+  if {![info exists led_pipe($key)] || $led_pipe($key) ne $pipe} { return }
+  foreach child [pid $pipe] {
+    catch {exec kill -KILL $child &}
+  }
+}
+
+proc ::AIORS::_led_queue {ch kind state} {
+  variable led_desired
+  set key "$ch,$kind"
+  set led_desired($key) $state
+  after 0 [list ::AIORS::_led_start $key]
+}
+
 proc ::AIORS::led_rx {rx_id is_open} {
   set ch [::AIORS::_led_ch $rx_id]
   set state [expr {$is_open ? "on" : "off"}]
@@ -185,10 +243,7 @@ proc ::AIORS::led_rx {rx_id is_open} {
     ::AIORS::_dbg "led_rx rx_id=$rx_id state=$state"
   }
 
-  # Call aiorsctl (ignore failures but log when debug)
-  if {[catch {exec $::AIORS::aiorsctl set led $ch rx $state} e]} {
-    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: aiorsctl led_rx failed: $e" }
-  }
+  ::AIORS::_led_queue $ch rx $state
 }
 
 proc ::AIORS::led_tx {tx_id is_on} {
@@ -199,9 +254,7 @@ proc ::AIORS::led_tx {tx_id is_on} {
     ::AIORS::_dbg "led_tx tx_id=$tx_id state=$state ch=$ch"
   }
 
-  if {[catch {exec $::AIORS::aiorsctl set led $ch tx $state} e]} {
-    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: aiorsctl led_tx failed: $e" }
-  }
+  ::AIORS::_led_queue $ch tx $state
 }
 
 proc ::AIORS::_note_tx_state {tx_id is_on} {
