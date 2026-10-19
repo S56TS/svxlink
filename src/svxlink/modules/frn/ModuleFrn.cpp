@@ -866,13 +866,17 @@ if (cmd == "get stats")
   cmd_exec->stdoutData.connect(
       [this](const char* buf, int cnt)
       {
-        cmd_stdout.append(buf, cnt);
+        const size_t limit = 65536;
+        if (cnt > 0 && cmd_stdout.size() < limit)
+          cmd_stdout.append(buf, std::min<size_t>(cnt, limit - cmd_stdout.size()));
       });
 
   cmd_exec->stderrData.connect(
       [this](const char* buf, int cnt)
       {
-        cmd_stderr.append(buf, cnt);
+        const size_t limit = 4096;
+        if (cnt > 0 && cmd_stderr.size() < limit)
+          cmd_stderr.append(buf, std::min<size_t>(cnt, limit - cmd_stderr.size()));
       });
 
   cmd_exec->exited.connect(

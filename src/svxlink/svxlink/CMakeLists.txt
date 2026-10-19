@@ -1,6 +1,6 @@
 # C++ source files needed to build SvxLink
 set(SVXLINK_SRCS
-  svxlink.cpp MsgHandler.cpp Module.cpp Logic.cpp EventHandler.cpp SvxStats.cpp
+  svxlink.cpp MsgHandler.cpp Module.cpp Logic.cpp EventHandler.cpp SvxStats.cpp AiorsLedClient.cpp
   LinkManager.cpp CmdParser.cpp QsoRecorder.cpp DtmfDigitHandler.cpp
   )
 
@@ -80,6 +80,9 @@ set(LIBS trx locationinfo asynccpp asyncaudio asynccore svxmisc ${LIBS})
 
 # Build the executable
 add_executable(svxlink ${SVXLINK_SRCS} ${VERSION_DEPENDS})
+
+find_package(Threads REQUIRED)
+set(LIBS ${LIBS} ${CMAKE_THREAD_LIBS_INIT})
 target_link_libraries(svxlink ${LIBS})
 set_target_properties(svxlink PROPERTIES
   ENABLE_EXPORTS on

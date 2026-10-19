@@ -16,6 +16,11 @@ mixin Logic
 # end of namespace
 }
 
+# The embedded interpreter does not run Tcl's after/fileevent queue.
+if {[info commands ::AIORS::ensure_hooks] ne ""} {
+  ::AIORS::ensure_hooks
+}
+
 #
 # This file has not been truncated
 #

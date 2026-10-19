@@ -55,6 +55,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include "EventHandler.h"
+#include "AiorsLedClient.h"
 #include "Module.h"
 
 
@@ -155,6 +156,13 @@ EventHandler::EventHandler(const string& event_script, const string& logic_name)
   Tcl_CreateCommand(interp, "setConfigValue", setConfigValueHandler,
                     this, NULL);
 
+  try {
+    aiors_leds = AiorsLedClient::shared();
+    Tcl_CreateCommand(interp, "aiorsSetLed", aiorsLedHandler, this, NULL);
+  } catch (const std::exception& error) {
+    cerr << "AIORS: cannot start LED worker: " << error.what() << endl;
+  }
+
   //setVariable("script_path", event_script);
 
 } /* EventHandler::EventHandler */
@@ -245,6 +253,22 @@ bool EventHandler::processEvent(const string& event)
   return success;
   
 } /* EventHandler::processEvent */
+
+int EventHandler::aiorsLedHandler(ClientData cdata, Tcl_Interp *irp,
+                                int argc, const char *argv[])
+{
+  if (argc != 4 || (strcmp(argv[1], "a") && strcmp(argv[1], "b")) ||
+      (strcmp(argv[2], "rx") && strcmp(argv[2], "tx")) ||
+      (strcmp(argv[3], "on") && strcmp(argv[3], "off"))) {
+    Tcl_SetResult(irp, const_cast<char*>("usage: aiorsSetLed a|b rx|tx on|off"), TCL_STATIC);
+    return TCL_ERROR;
+  }
+  auto *handler = static_cast<EventHandler*>(cdata);
+  const unsigned led = (strcmp(argv[1], "b") == 0 ? 2 : 0) +
+                       (strcmp(argv[2], "tx") == 0 ? 1 : 0);
+  handler->aiors_leds->set(led, strcmp(argv[3], "on") == 0);
+  return TCL_OK;
+}
 
 
 const string EventHandler::eventResult(void) const

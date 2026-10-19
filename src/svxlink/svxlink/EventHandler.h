@@ -40,6 +40,9 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <string>
 #include <sstream>
 #include <functional>
+#include <memory>
+
+class AiorsLedClient;
 
 
 /****************************************************************************
@@ -281,6 +284,9 @@ class EventHandler : public sigc::trackable
     std::string   event_script;
     std::string   logic_name;
     Tcl_Interp *  interp;
+    std::shared_ptr<AiorsLedClient> aiors_leds;
+    static int aiorsLedHandler(ClientData cdata, Tcl_Interp *irp,
+                              int argc, const char *argv[]);
 
     static int playFileHandler(ClientData cdata, Tcl_Interp *irp,
       	      	    int argc, const char *argv[]);

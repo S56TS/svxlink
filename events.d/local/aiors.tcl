@@ -3,7 +3,7 @@
 #
 # Notes:
 # - With your C++ patch, RepeaterLogic now always dispatches Tcl "squelch_open rx_id is_open".
-# - This script wraps the appropriate squelch_open + transmit procs and calls aiorsctl.
+# - This script wraps squelch_open + transmit and queues native background LED updates.
 # - Script is idempotent: safe if sourced twice (won't rewrap / spam / break procs).
 
 namespace eval ::AIORS {
@@ -54,8 +54,6 @@ namespace eval ::AIORS {
   variable inst_ns ""
   variable logic_ns ""
 
-  # aiorsctl path (resolved after _log/_warn are defined)
-  variable aiorsctl ""
 }
 
 proc ::AIORS::_ini_get {path section key def} {
@@ -133,21 +131,12 @@ proc ::AIORS::_warn {msg} {
 
 ::AIORS::_log "AIORS: local/aiors.tcl loaded"
 
-# Resolve aiorsctl path safely (don't crash if unset)
-if {![info exists ::AIORS::aiorsctl] || $::AIORS::aiorsctl eq ""} {
-  if {[file executable "/usr/local/bin/aiorsctl"]} {
-    set ::AIORS::aiorsctl "/usr/local/bin/aiorsctl"
-  } elseif {[file executable "/usr/bin/aiorsctl"]} {
-    set ::AIORS::aiorsctl "/usr/bin/aiorsctl"
-  } else {
-    set ::AIORS::aiorsctl [auto_execok aiorsctl]
-  }
-}
-
-if {$::AIORS::aiorsctl eq ""} {
-  ::AIORS::_warn "AIORS: aiorsctl not found; LED hooks disabled"
+# The native command only updates memory. A shared C++ worker performs IPC,
+# acknowledgements, retries and refreshes without using Tcl's event loop.
+if {[info commands ::aiorsSetLed] eq ""} {
+  ::AIORS::_warn "AIORS: native LED worker unavailable; update the SvxLink binary as well as aiors.tcl"
 } else {
-  ::AIORS::_log "AIORS: aiorsctl=$::AIORS::aiorsctl"
+  ::AIORS::_log "AIORS: native background LED communication enabled"
 }
 
 proc ::AIORS::_refresh_namespaces {} {
@@ -164,78 +153,29 @@ proc ::AIORS::_refresh_namespaces {} {
 proc ::AIORS::_led_ch {id} {
   # Map rx_id/tx_id to channel a/b.
   # Your svxlink.conf: RX_ID=0 means "0".
-  # Keep it simple: 0->a, 1->b, otherwise default a.
+  # Numeric IDs are zero-based; named Rx1/Tx1, Rx2/Tx2 are one-based.
   if {$id eq ""} { return "a" }
   if {[string is integer -strict $id]} {
-    return [expr {$id == 0 ? "a" : "b"}]
+    if {$id == 0} { return "a" }
+    if {$id == 1} { return "b" }
+    return ""
   }
   # If someone passes "Rx1"/"Tx2", take trailing digit
   if {[regexp {([0-9]+)$} $id -> n]} {
-    return [expr {$n == 0 ? "a" : "b"}]
+    if {$n == 1} { return "a" }
+    if {$n == 2} { return "b" }
   }
-  return "a"
-}
-
-proc ::AIORS::_led_start {key} {
-  variable led_desired
-  variable led_sent
-  variable led_pipe
-  variable led_timeout
-  if {[info exists led_pipe($key)] || ![info exists led_desired($key)]} { return }
-  if {[info exists led_sent($key)] && $led_sent($key) eq $led_desired($key)} { return }
-  if {$::AIORS::aiorsctl eq ""} { return }
-
-  lassign [split $key ,] ch kind
-  set state $led_desired($key)
-  set command [list $::AIORS::aiorsctl set led $ch $kind $state]
-  if {[catch {open "|$command" r} pipe]} {
-    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: LED process failed to start: $pipe" }
-    return
-  }
-  fconfigure $pipe -blocking 0
-  set led_pipe($key) $pipe
-  set led_sent($key) $state
-  fileevent $pipe readable [list ::AIORS::_led_readable $key $pipe]
-  set led_timeout($key) [after 2500 [list ::AIORS::_led_timeout $key $pipe]]
-}
-
-proc ::AIORS::_led_readable {key pipe} {
-  variable led_pipe
-  variable led_timeout
-  variable led_sent
-  if {![info exists led_pipe($key)] || $led_pipe($key) ne $pipe} { return }
-  catch {read $pipe}
-  if {![eof $pipe]} { return }
-  fileevent $pipe readable {}
-  after cancel $led_timeout($key)
-  unset led_timeout($key)
-  unset led_pipe($key)
-  if {[catch {close $pipe} err]} {
-    unset -nocomplain led_sent($key)
-    if {$::AIORS::debug} { ::AIORS::_warn "AIORS: LED update failed: $err" }
-    after 1000 [list ::AIORS::_led_start $key]
-  } else {
-    after 0 [list ::AIORS::_led_start $key]
-  }
-}
-
-proc ::AIORS::_led_timeout {key pipe} {
-  variable led_pipe
-  if {![info exists led_pipe($key)] || $led_pipe($key) ne $pipe} { return }
-  foreach child [pid $pipe] {
-    catch {exec kill -KILL $child &}
-  }
+  return ""
 }
 
 proc ::AIORS::_led_queue {ch kind state} {
-  variable led_desired
-  set key "$ch,$kind"
-  set led_desired($key) $state
-  after 0 [list ::AIORS::_led_start $key]
+  if {[info commands ::aiorsSetLed] eq ""} { return }
+  ::aiorsSetLed $ch $kind $state
 }
 
 proc ::AIORS::led_rx {rx_id is_open} {
   set ch [::AIORS::_led_ch $rx_id]
+  if {$ch eq ""} { return }
   set state [expr {$is_open ? "on" : "off"}]
 
   if {$::AIORS::debug} {
@@ -248,6 +188,7 @@ proc ::AIORS::led_rx {rx_id is_open} {
 
 proc ::AIORS::led_tx {tx_id is_on} {
   set ch [::AIORS::_led_ch $tx_id]
+  if {$ch eq ""} { return }
   set state [expr {$is_on ? "on" : "off"}]
 
   if {$::AIORS::debug} {
@@ -489,8 +430,7 @@ proc ::AIORS::_try_install_tx_hook {} {
     if {[info procs $name] eq ""} { continue }
 
     if {[::AIORS::_wrap_proc $name {
-      # Keep hooks in place if anything overrides later
-      catch { ::AIORS::ensure_hooks }
+      # Hook installation/configuration reads happen at startup, outside TX events.
 
       if {[llength $args] == 1} {
         set tx_id "0"
@@ -583,17 +523,6 @@ proc ::AIORS::_try_install_rx_hook {} {
 
   set ::AIORS::hooked_rx 0
   return 0
-}
-
-proc ::AIORS::_schedule_rx_rehook {} {
-  # Other scripts may override squelch_open later; re-check a few times.
-  if {$::AIORS::rehook_scheduled} { return }
-  set ::AIORS::rehook_scheduled 1
-
-  after 0    ::AIORS::_try_install_rx_hook
-  after 200  ::AIORS::_try_install_rx_hook
-  after 1000 ::AIORS::_try_install_rx_hook
-  after 3000 ::AIORS::_try_install_rx_hook
 }
 
 # ---- Courtesy/roger beep override (optional) ----
@@ -881,7 +810,6 @@ proc ::AIORS::ensure_hooks {} {
 
   ::AIORS::_try_install_tx_hook
   ::AIORS::_try_install_rx_hook
-  ::AIORS::_schedule_rx_rehook
 
 
   ::AIORS::_install_status_report_suppress
@@ -908,10 +836,4 @@ if {[file readable $::AIORS::frn_autostart_script]} {
   ::AIORS::_dbg "AIORS FRN autostart script not found: $::AIORS::frn_autostart_script"
 }
 
-# ---- delayed re-hook after Logic is fully mixed in ----
-after 0 {
-  catch {
-    ::AIORS::_log "AIORS: delayed hook retry"
-    ::AIORS::ensure_hooks
-  }
-}
+# Logic type scripts re-install hooks directly after mixin, without Tcl timers.
