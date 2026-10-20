@@ -1,6 +1,7 @@
 # AIORS FRN RunCmd Diagnostics Report
 
-Generated from the current SvxLink and AIORS workspaces on 2026-08-23.
+Originally generated from the local SvxLink and AIORS workspaces on 2026-08-23.
+Software identity reporting and LED integration notes updated on 2026-10-20.
 
 ## Summary
 
@@ -18,7 +19,7 @@ There are seven allowlisted RunCmd commands:
 | `get psu all` | Runs external `aiorsctl get psu all`. | AIORS controller via `aiorsctl` |
 | `get temp all` | Runs external `aiorsctl get temp all`. | AIORS controller via `aiorsctl` |
 
-The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It handles AIORS runtime integration by wrapping SvxLink RX/TX Tcl event procedures and calling `aiorsctl set led ...`. Version, PSU, and temperature RunCmd commands use the external AIORS control entry point, `aiorsctl`.
+The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It wraps SvxLink RX/TX Tcl event procedures and queues LED states through the native `aiorsSetLed` command. Version, PSU, and temperature RunCmd commands use the external AIORS control entry point, `aiorsctl`.
 
 ## FRN Message Flow
 
@@ -119,11 +120,36 @@ FRN link transitions call `SvxStats::onFrnLinkUp()` and `SvxStats::onFrnLinkDown
 The FRN response is a single readable line when it fits within the protocol limit:
 
 ```text
-CmdReply: svxlink 1.9.99.36@25.05.1-95-g3dc7d4f6; aiorsd <AIORS full version>
+CmdReply: svxlink 1.9.99.36@25.05.1-97-g1c60ffaf-dirty; aiorsd 4f165e5-dirty (hw 1.0)
 ```
 
-The periodic `STATS` record also contains `svxlink_software_version` and
-`svxlink_software_revision`, matching the AIORS software identity fields.
+AIORS now reports only its build-time Git description and hardware revision;
+the manually maintained software release number has been removed. A Git
+description can be a short commit hash or a tag-based description. `-dirty`
+indicates uncommitted build changes. `unknown` means the Git identity was not
+available at build time. Treat the description as an opaque string. Hardware
+`1.0`/`1.1` and SvxLink's own version format are unchanged.
+
+The bridge forwards the daemon's text without requiring a dotted software
+release number. It uses `aiorsctl version`, which queries the running daemon;
+`aiorsctl --version` would identify the control binary instead. After installing
+a new daemon binary, restart `aiorsd` to run that build.
+
+The periodic full `STATS` record and MQTT snapshot contain these identity fields:
+
+| Fields | Meaning |
+|---|---|
+| `aiors_software_version`, `aiors_software_revision` | Both contain the AIORS daemon's Git description |
+| `aiors_hardware_version` | Board revision, `1.0` or `1.1` |
+| `svxlink_software_version`, `svxlink_software_revision` | SvxLink's own version and revision, in their existing formats |
+
+The compact FRN `get stats` groups described above do not include this complete
+identity snapshot. Use `get version` for the daemon identity over FRN.
+MQTT status reports the independent agent's Git description in both
+`agent_version` and `agent_revision`; that revision may differ from the daemon.
+MQTT identity values remain JSON strings, even for numeric-looking hashes.
+AIORS diagnostics schema `4`, SvxLink snapshot schema `3`, and MQTT envelope
+schema `1` remain unchanged.
 
 ### `get psu a`
 
@@ -202,17 +228,24 @@ aiorsctl get temp all
 
 `ModuleFrn` does not parse AIORS hardware readings itself. It captures stdout/stderr from `aiorsctl`, sanitizes/chunks the text reply, and sends it back to the requesting FRN client.
 
-The `aiorsctl` implementation and the underlying AIORS daemon/sensor code were not present in this SvxLink workspace, so this report can identify the command interface and call path, but not the exact ADC/I2C/GPIO/sensor code used by AIORS to produce PSU and temperature values.
+The original August report covered the SvxLink call path. The October identity
+update also checked the AIORS CLI formatter, SvxLink diagnostics parser, MQTT
+conversion and FRN reply formatter using ARM64 test programs. It did not test
+a live broker, FRN connection, or physical sensor accuracy.
 
 ### AIORS Tcl integration
 
 `events.d/local/aiors.tcl` integrates SvxLink logic events with AIORS hardware control:
 
-- It resolves `aiorsctl` from `/usr/local/bin/aiorsctl`, `/usr/bin/aiorsctl`, or `auto_execok aiorsctl`.
 - It maps RX/TX IDs to AIORS channel `a` or `b`.
-- It wraps SvxLink `transmit` Tcl procedures and calls `aiorsctl set led <channel> tx on|off`.
-- It wraps SvxLink `squelch_open` Tcl procedures and calls `aiorsctl set led <channel> rx on|off`.
+- It wraps SvxLink `transmit` Tcl procedures and calls `aiorsSetLed <channel> tx on|off`.
+- It wraps SvxLink `squelch_open` Tcl procedures and calls `aiorsSetLed <channel> rx on|off`.
 - It is idempotent, so re-sourcing the file should not double-wrap the same procedures.
+
+The native command updates four desired LED states in memory. A shared worker
+performs AIORS command/reply file I/O, acknowledgement checking, retries and
+periodic refresh outside the SvxLink audio event loop. See
+`docs/AIORS_LED_COMMUNICATION.md` for the protocol, timeouts and recovery behavior.
 
 The C++ `Logic` class emits compatible Tcl events:
 
@@ -244,6 +277,10 @@ The relevant defaults are:
 
 ## Source References
 
+The line numbers below are historical anchors from the original report;
+search for the named functions in current source. The current LED worker is
+`src/svxlink/svxlink/AiorsLedClient.cpp`, registered through `EventHandler.cpp`.
+
 | Area | Source |
 | --- | --- |
 | RunCmd configuration load | `src/svxlink/modules/frn/ModuleFrn.cpp:216` |
@@ -261,8 +298,8 @@ The relevant defaults are:
 | Core RF squelch stats source | `src/svxlink/svxlink/Logic.cpp:1075` |
 | Core RF TX stats source | `src/svxlink/svxlink/Logic.cpp:1133` |
 | Stats startup/persistence | `src/svxlink/svxlink/svxlink.cpp:449` |
-| AIORS Tcl `aiorsctl` resolution | `events.d/local/aiors.tcl:136` |
-| AIORS RX LED command | `events.d/local/aiors.tcl:179` |
-| AIORS TX LED command | `events.d/local/aiors.tcl:194` |
-| AIORS TX hook | `events.d/local/aiors.tcl:424` |
-| AIORS RX hook | `events.d/local/aiors.tcl:466` |
+| Native LED queue dispatch | `events.d/local/aiors.tcl`: `::AIORS::_led_queue` |
+| AIORS RX LED command | `events.d/local/aiors.tcl`: `::AIORS::led_rx` |
+| AIORS TX LED command | `events.d/local/aiors.tcl`: `::AIORS::led_tx` |
+| AIORS TX hook | `events.d/local/aiors.tcl`: `::AIORS::_try_install_tx_hook` |
+| AIORS RX hook | `events.d/local/aiors.tcl`: `::AIORS::_try_install_rx_hook` |

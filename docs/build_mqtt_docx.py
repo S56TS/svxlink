@@ -1,8 +1,10 @@
-"""Build the MQTT guide as DOCX using Python 3's standard library.
+"""Build the MQTT or FRN guide as DOCX using Python 3's standard library.
 
 Run from any directory: python3 docs/build_mqtt_docx.py
-Supports the headings, paragraphs, fenced code, lists and tables in this guide.
+For FRN: python3 docs/build_mqtt_docx.py docs/AIORS_FRN_RunCmd_Diagnostics_Report.md --footer "AIORS FRN"
+Supports the headings, paragraphs, fenced code, lists and tables in these guides.
 """
+import argparse
 from pathlib import Path
 import re
 from xml.sax.saxutils import escape
@@ -10,8 +12,14 @@ from zipfile import ZipFile, ZIP_DEFLATED
 import xml.etree.ElementTree as ET
 
 BASE = Path(__file__).resolve().parent
-SOURCE = BASE / 'MQTT_TELEMETRY_AND_SERVER.md'
-OUTPUT = SOURCE.with_suffix('.docx')
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('source', nargs='?', type=Path,
+                    default=BASE / 'MQTT_TELEMETRY_AND_SERVER.md')
+parser.add_argument('--output', type=Path)
+parser.add_argument('--footer', default='AIORS MQTT')
+args = parser.parse_args()
+SOURCE = args.source.resolve()
+OUTPUT = args.output.resolve() if args.output else SOURCE.with_suffix('.docx')
 W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 def runs(text, code=False):
@@ -29,6 +37,9 @@ def paragraph(text, style='Normal', code=False):
     return f'<w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>{runs(text, code)}</w:p>'
 
 lines = SOURCE.read_text(encoding='utf-8').splitlines()
+expected_tables = sum(line.startswith('|') and
+                      (index == 0 or not lines[index - 1].startswith('|'))
+                      for index, line in enumerate(lines))
 body = []
 i = 0
 while i < len(lines):
@@ -101,7 +112,7 @@ parts = {
     'word/document.xml': document,
     'word/styles.xml': styles,
     'word/_rels/document.xml.rels': f'<Relationships xmlns="{rels_ns}"><Relationship Id="rId1" Type="{rel_type}styles" Target="styles.xml"/><Relationship Id="rId2" Type="{rel_type}footer" Target="footer1.xml"/></Relationships>',
-    'word/footer1.xml': f'<w:ftr xmlns:w="{W}"><w:p><w:pPr><w:jc w:val="center"/></w:pPr>{runs("AIORS MQTT | ")}<w:fldSimple w:instr="PAGE"/></w:p></w:ftr>',
+    'word/footer1.xml': f'<w:ftr xmlns:w="{W}"><w:p><w:pPr><w:jc w:val="center"/></w:pPr>{runs(args.footer + " | ")}<w:fldSimple w:instr="PAGE"/></w:p></w:ftr>',
 }
 with ZipFile(OUTPUT, 'w', ZIP_DEFLATED) as z:
     for name, xml in parts.items():
@@ -110,5 +121,5 @@ with ZipFile(OUTPUT, 'w', ZIP_DEFLATED) as z:
 with ZipFile(OUTPUT) as z:
     assert z.testzip() is None
     tree = ET.fromstring(z.read('word/document.xml'))
-    assert len(tree.findall(f'.//{{{W}}}tbl')) == 4
+    assert len(tree.findall(f'.//{{{W}}}tbl')) == expected_tables
 print(f'Created and validated {OUTPUT} ({OUTPUT.stat().st_size} bytes)')

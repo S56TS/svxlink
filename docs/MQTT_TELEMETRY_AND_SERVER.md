@@ -1,9 +1,11 @@
 # AIORS + SvxLink MQTT Telemetry
 
-Reviewed against local source on 28 September 2026. MQTT envelope schema: 1;
-SvxLink snapshot schema: 3. This edition updates the existing aiors_deploy guide.
-The review covers source, configuration, installer, service and broker examples;
-it does not certify a running Pi, broker, or the locally modified prebuilt binaries.
+Architecture reviewed against local source on 28 September 2026; software
+identity reporting updated on 20 October 2026. MQTT envelope schema: 1;
+SvxLink snapshot schema: 3; AIORS diagnostics schema: 4. This edition updates
+the existing aiors_deploy guide. The architecture review covers source,
+configuration, installer, service and broker examples; it does not certify a
+running Pi, broker, or the locally modified prebuilt binaries.
 
 ## Architecture
 
@@ -57,7 +59,7 @@ For `CALLSIGN=S5RPTAIORS`, the agent uses:
 
 | Topic | QoS | Retained | Contents |
 |---|---:|---:|---|
-| `frn/aiors/v1/S5RPTAIORS/status` | 1 | yes | Online/offline state, agent version, boot ID, command state, queue depth |
+| `frn/aiors/v1/S5RPTAIORS/status` | 1 | yes | Online/offline state, agent Git identity, boot ID, command state, queue depth |
 | `frn/aiors/v1/S5RPTAIORS/telemetry` | 1 | yes | Complete latest SvxLink statistics snapshot, including AIORS diagnostics |
 | `frn/aiors/v1/S5RPTAIORS/events` | 1 | no | Important AIORS state and fault transitions |
 | `frn/aiors/v1/S5RPTAIORS/command/request` | 1 | no | Server-to-node structured control request; subscription is disabled by default |
@@ -85,6 +87,10 @@ Example envelope:
   "metrics": {
     "stats_schema": 3,
     "ts_unix_s": 1787574600,
+    "aiors_diagnostics_version": "4",
+    "aiors_software_version": "4f165e5-dirty",
+    "aiors_software_revision": "4f165e5-dirty",
+    "aiors_hardware_version": "1.0",
     "aiors_overall_status": "ok",
     "aiors_psu_a_input_voltage_v": 13.72,
     "aiors_psu_a_energy_wh_total": 126.31
@@ -98,6 +104,76 @@ numbers. Keys containing `status`, `state`, `version`, `revision`, `scope`, `err
 Other nonnumeric values also remain strings. This means, for example,
 `aiors_psu_a_state_change_evt_total` is a string. Consumers must follow the
 actual JSON type rather than assume all counters are numbers.
+
+## Software and hardware identity
+
+AIORS uses the Git description embedded at build time as its software version;
+there is no separately maintained software release number. A description can
+be a short commit hash, a tag-based description, or either with `-dirty` for
+uncommitted build changes. `unknown` means Git metadata was unavailable and no
+`GIT_VERSION` override was supplied. A dirty build cannot be reproduced from
+the named commit alone; use committed source for release builds.
+
+The existing field names are retained:
+
+| Location | Fields | Value |
+|---|---|---|
+| MQTT `status` | `agent_version`, `agent_revision` | Both contain the MQTT agent's Git description |
+| MQTT `telemetry.metrics` | `aiors_software_version`, `aiors_software_revision` | Both contain the running AIORS daemon's Git description, sampled by SvxLink |
+| MQTT `telemetry.metrics` | `aiors_hardware_version` | Board revision, `1.0` or `1.1` |
+| MQTT `telemetry.metrics` | `svxlink_software_version`, `svxlink_software_revision` | SvxLink's own version and revision; their existing formats are unchanged |
+
+For example, these fields appear in a status message (excerpt):
+
+```json
+{
+  "schema": 1,
+  "kind": "status",
+  "node_id": "S5RPTAIORS",
+  "state": "online",
+  "agent_version": "4f165e5-dirty",
+  "agent_revision": "4f165e5-dirty"
+}
+```
+
+Store software identifiers and hardware revisions as strings, including hashes
+containing only digits. Do not parse them as dotted release numbers or sort
+them numerically to determine which build is newer. The agent and daemon are
+separate binaries and may report different revisions after partial upgrades.
+Daemon identity in telemetry follows SvxLink's sampling interval; unavailable
+identity fields are `null` through the normal `na` conversion.
+
+Check the binaries installed on a node with:
+
+```sh
+aiorsd --version
+aiorsctl --version
+aiorsctl version
+aiors-mqtt-agent --version
+```
+
+Example output when all AIORS components were built from the same modified
+source for hardware 1.0:
+
+```text
+aiorsd 4f165e5-dirty (hw 1.0)
+aiorsctl 4f165e5-dirty (hw 1.0)
+aiorsd 4f165e5-dirty (hw 1.0)
+aiors-mqtt-agent 4f165e5-dirty
+```
+
+`aiorsctl version` queries the running daemon; `--version` identifies the
+binary invoked. The MQTT agent is independent of the hardware revision.
+FRN `get version` forwards the daemon identity alongside SvxLink's own version.
+
+Protocol schemas remain separate from software identity: MQTT `schema` stays
+numeric `1`, the topic prefix stays `frn/aiors/v1`, snapshot `stats_schema`
+stays numeric `3`, and AIORS `diagnostics_version` stays `4`. The last field
+appears as `"aiors_diagnostics_version": "4"` in MQTT because keys containing
+`version` are serialized as strings. No topic or schema migration is needed
+for this software version change.
+
+## Snapshot sampling and fields
 
 The agent polls every 1000 ms by default, but only queues changed snapshot
 contents. SvxLink writes snapshots on `STATS_INTERVAL` (default 60 seconds);
@@ -410,8 +486,18 @@ control socket. MQTT status reports agent connectivity, not radio health.
 
 ## Review provenance
 
-This review used the current local working files, including uncommitted files
-where present. It did not fetch remote branches. Repository HEADs at review:
+The software identity update on 20 October 2026 used local AIORS CLI/MQTT and
+SvxLink statistics/FRN source, including the uncommitted removal of AIORS's
+manual software version. CLI diagnostics, SvxLink snapshot parsing, MQTT
+conversion and FRN reply formatting were checked with ARM64 test programs.
+This did not include a live broker or FRN connection. Repository HEADs for
+that update were AIORS BSP `4f165e54fe33814c3510f35fe6f77c5483454a1a` and
+SvxLink `d3c4f4fa6ad0652bcc599c7e91556f3eb0d8dd96`; HEAD alone does not identify
+the uncommitted changes.
+
+The original 28 September architecture review used local working files,
+including uncommitted files where present. It did not fetch remote branches.
+Repository HEADs at that earlier review:
 
 - SvxLink: 9c24ac6e1c513234d8eea9bfb4738cb8d0dde3bb
 - AIORS BSP: 18826790dd585b032e0e74ffe23324d5c0affaf0
@@ -419,7 +505,8 @@ where present. It did not fetch remote branches. Repository HEADs at review:
 
 The original guide is in `aiors_bsp/.git/aiors_deploy/docs` in this checkout
 layout. This reviewed edition and its DOCX are in `svxlink/docs`.
-SHA-256 fingerprints below identify the reviewed implementation files.
+SHA-256 fingerprints below identify the implementation files from that earlier
+architecture review, not the October software identity update.
 
 svxlink/src/svxlink/svxlink/SvxStats.cpp
 
