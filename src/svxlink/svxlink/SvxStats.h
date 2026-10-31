@@ -139,14 +139,30 @@ private:
     AIORS_METRIC_COUNT
   };
 
+  enum AiorsRadio
+  {
+    AIORS_RADIO_AI = 0,
+    AIORS_RADIO_BI,
+    AIORS_RADIO_AE,
+    AIORS_RADIO_BE,
+    AIORS_RADIO_COUNT
+  };
+
   enum AiorsStatus
   {
     AIORS_STATUS_SA818_A = 0,
     AIORS_STATUS_SA818_B,
     AIORS_STATUS_CM108_A,
     AIORS_STATUS_CM108_B,
+    AIORS_STATUS_RADIO_AI,
+    AIORS_STATUS_RADIO_BI,
+    AIORS_STATUS_RADIO_AE,
+    AIORS_STATUS_RADIO_BE,
     AIORS_STATUS_COUNT
   };
+
+  static const char* const aiors_radio_names[AIORS_RADIO_COUNT];
+  static const char* const aiors_status_names[AIORS_STATUS_COUNT];
 
   struct AiorsSample
   {
@@ -171,7 +187,8 @@ private:
     std::string environment_status;
     std::string digital_inputs_status;
     std::array<std::string, 4> digital_inputs;
-    std::array<std::string, AIORS_STATUS_COUNT> statuses;
+    std::array<std::string, AIORS_STATUS_COUNT> statuses{{"na", "na", "na", "na", "na", "na", "na", "na"}};
+    std::array<std::string, AIORS_RADIO_COUNT> radio_states{{"na", "na", "na", "na"}};
     std::string overall_status;
   };
 

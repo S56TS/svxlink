@@ -20,6 +20,17 @@
 
 using std::string;
 
+const char* const SvxStats::aiors_radio_names[AIORS_RADIO_COUNT] =
+{
+  "ai", "bi", "ae", "be"
+};
+
+const char* const SvxStats::aiors_status_names[AIORS_STATUS_COUNT] =
+{
+  "aiors_sa818_a", "aiors_sa818_b", "aiors_cm108_a", "aiors_cm108_b",
+  "aiors_radio_ai", "aiors_radio_bi", "aiors_radio_ae", "aiors_radio_be"
+};
+
 static inline double mono_now_sec()
 {
   using namespace std::chrono;
@@ -734,6 +745,19 @@ std::vector<std::string> SvxStats::formatStatsGroups()
     out.push_back(os.str());
   }
 
+  if (aiors_diagnostics_enabled)
+  {
+    const AiorsSample* current = aiors_samples.empty() ? nullptr : &aiors_samples.back();
+    std::ostringstream os;
+    os << "RADIOS";
+    for (size_t radio = 0; radio < AIORS_RADIO_COUNT; ++radio)
+      os << " " << aiors_radio_names[radio] << "="
+         << (current ? current->radio_states[radio] : "na");
+    os << " sample_ok=" << (last_aiors_attempt_ok ? 1 : 0)
+       << " age=" << age_s(last_aiors_success_monotonic) << "s";
+    out.push_back(os.str());
+  }
+
   return out;
 }
 
@@ -993,6 +1017,30 @@ bool SvxStats::parseAiorsDiagnostics(const std::string& text,
     {
       error = std::string("invalid_") + field.key;
       return false;
+    }
+  }
+
+  if (sample.diagnostics_version >= 5)
+  {
+    for (size_t radio = 0; radio < AIORS_RADIO_COUNT; ++radio)
+    {
+      const std::string key = std::string("radio_") + aiors_radio_names[radio] + "_status";
+      std::string& state = sample.radio_states[radio];
+      if (!get_required(key.c_str(), state))
+        return false;
+      if (state != "ready" && state != "disabled" && state != "unimplemented" &&
+          state != "absent" && state != "mismatch" && state != "config_error" &&
+          state != "uninitialized")
+      {
+        error = "invalid_" + key;
+        return false;
+      }
+      const std::string status = state == "ready" ? "ok" :
+          (state == "disabled" || state == "unimplemented" ? "na" : "fault");
+      sample.statuses[AIORS_STATUS_RADIO_AI + radio] = status;
+      // Keep legacy names, but do not count intentionally unmanaged radios as faults.
+      if (radio == AIORS_RADIO_AI) sample.statuses[AIORS_STATUS_SA818_A] = status;
+      if (radio == AIORS_RADIO_BI) sample.statuses[AIORS_STATUS_SA818_B] = status;
     }
   }
 
@@ -1363,6 +1411,10 @@ void SvxStats::appendAiorsStats(std::ostringstream& os, double now_s) const
      << " aiors_cm108_a_status=" << status_value(AIORS_STATUS_CM108_A)
      << " aiors_cm108_b_status=" << status_value(AIORS_STATUS_CM108_B);
 
+  for (size_t radio = 0; radio < AIORS_RADIO_COUNT; ++radio)
+    os << " aiors_radio_" << aiors_radio_names[radio] << "_status="
+       << (current ? current->radio_states[radio] : "na");
+
   for (size_t i = 0; i < 4; ++i)
   {
     os << " aiors_di" << i << "="
@@ -1436,24 +1488,17 @@ void SvxStats::appendAiorsStats(std::ostringstream& os, double now_s) const
      << " aiors_psu_a_fault_s_1h=" << seconds(one_hour.psu_a_fault_s)
      << " aiors_psu_b_fault_s_1h=" << seconds(one_hour.psu_b_fault_s);
 
-  static const char* status_names[AIORS_STATUS_COUNT] =
-  {
-    "aiors_sa818_a",
-    "aiors_sa818_b",
-    "aiors_cm108_a",
-    "aiors_cm108_b"
-  };
   auto append_status_window = [&](const AiorsWindow& window,
                                   const char* suffix)
   {
     for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
     {
       const StatusAgg& agg = window.statuses[status];
-      os << " " << status_names[status] << "_fault_evt_" << suffix
+      os << " " << aiors_status_names[status] << "_fault_evt_" << suffix
          << "=" << agg.fault_events
-         << " " << status_names[status] << "_fault_samples_" << suffix
+         << " " << aiors_status_names[status] << "_fault_samples_" << suffix
          << "=" << agg.fault_samples
-         << " " << status_names[status] << "_fault_s_" << suffix
+         << " " << aiors_status_names[status] << "_fault_s_" << suffix
          << "=" << seconds(agg.fault_s);
     }
   };
@@ -1462,11 +1507,11 @@ void SvxStats::appendAiorsStats(std::ostringstream& os, double now_s) const
   for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
   {
     const StatusAgg& total = aiors_totals.statuses[status];
-    os << " " << status_names[status] << "_fault_evt_total="
+    os << " " << aiors_status_names[status] << "_fault_evt_total="
        << total.fault_events
-       << " " << status_names[status] << "_fault_samples_total="
+       << " " << aiors_status_names[status] << "_fault_samples_total="
        << total.fault_samples
-       << " " << status_names[status] << "_fault_s_total="
+       << " " << aiors_status_names[status] << "_fault_s_total="
        << seconds(total.fault_s);
   }
 
@@ -1680,6 +1725,20 @@ void SvxStats::loadPersistedTotals()
       try { dst = std::stod(v); } catch (...) {}
     };
 
+    bool status_total = false;
+    for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
+    {
+      const std::string prefix = aiors_status_names[status];
+      StatusAgg& total = aiors_totals.statuses[status];
+      if (k == prefix + "_fault_evt_total") parse_u64(total.fault_events);
+      else if (k == prefix + "_fault_samples_total") parse_u64(total.fault_samples);
+      else if (k == prefix + "_fault_s_total") parse_d(total.fault_s);
+      else continue;
+      status_total = true;
+      break;
+    }
+    if (status_total) continue;
+
     // New (v4) persisted totals
     if (k == "rf_tx_s_total") parse_d(rf_tx_total.sec);
     else if (k == "rf_tx_evt_total") parse_u64(rf_tx_total.evt);
@@ -1726,18 +1785,6 @@ void SvxStats::loadPersistedTotals()
     else if (k == "aiors_psu_b_fault_s_total") parse_d(aiors_totals.psu_b_fault_s);
     else if (k == "aiors_degraded_s_total") parse_d(aiors_totals.degraded_s);
     else if (k == "aiors_fault_s_total") parse_d(aiors_totals.fault_s);
-    else if (k == "aiors_sa818_a_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_events);
-    else if (k == "aiors_sa818_a_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_samples);
-    else if (k == "aiors_sa818_a_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_s);
-    else if (k == "aiors_sa818_b_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_events);
-    else if (k == "aiors_sa818_b_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_samples);
-    else if (k == "aiors_sa818_b_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_s);
-    else if (k == "aiors_cm108_a_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_events);
-    else if (k == "aiors_cm108_a_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_samples);
-    else if (k == "aiors_cm108_a_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_s);
-    else if (k == "aiors_cm108_b_fault_evt_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_events);
-    else if (k == "aiors_cm108_b_fault_samples_total") parse_u64(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_samples);
-    else if (k == "aiors_cm108_b_fault_s_total") parse_d(aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_s);
 
     // Legacy keys (older experiments)
     else if (k == "rf_tx_hours_total") { double h=0; parse_d(h); rf_tx_total.sec = h * 3600.0; }
@@ -1802,18 +1849,13 @@ void SvxStats::savePersistedTotals()
   o << "aiors_psu_b_fault_s_total=" << aiors_totals.psu_b_fault_s << "\n";
   o << "aiors_degraded_s_total=" << aiors_totals.degraded_s << "\n";
   o << "aiors_fault_s_total=" << aiors_totals.fault_s << "\n";
-  o << "aiors_sa818_a_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_events << "\n";
-  o << "aiors_sa818_a_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_samples << "\n";
-  o << "aiors_sa818_a_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_A].fault_s << "\n";
-  o << "aiors_sa818_b_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_events << "\n";
-  o << "aiors_sa818_b_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_samples << "\n";
-  o << "aiors_sa818_b_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_SA818_B].fault_s << "\n";
-  o << "aiors_cm108_a_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_events << "\n";
-  o << "aiors_cm108_a_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_samples << "\n";
-  o << "aiors_cm108_a_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_A].fault_s << "\n";
-  o << "aiors_cm108_b_fault_evt_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_events << "\n";
-  o << "aiors_cm108_b_fault_samples_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_samples << "\n";
-  o << "aiors_cm108_b_fault_s_total=" << aiors_totals.statuses[AIORS_STATUS_CM108_B].fault_s << "\n";
+  for (size_t status = 0; status < AIORS_STATUS_COUNT; ++status)
+  {
+    const StatusAgg& total = aiors_totals.statuses[status];
+    o << aiors_status_names[status] << "_fault_evt_total=" << total.fault_events << "\n";
+    o << aiors_status_names[status] << "_fault_samples_total=" << total.fault_samples << "\n";
+    o << aiors_status_names[status] << "_fault_s_total=" << total.fault_s << "\n";
+  }
   {
     std::lock_guard<std::mutex> lock(stats_writer_mutex);
     stats_persist_text = o.str();

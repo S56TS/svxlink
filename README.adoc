@@ -30,6 +30,10 @@ either C++ or TCL. Examples of modules are:
 * *Frn*                -- Connect to Free Radio Network (FRN) servers
 * *Trx*                -- Remote control tranceivers using DTMF
 
+Optional AIORS voice integration is available as a separate linked logic core.
+See link:docs/AIORS_CHAT.md[AI voice setup] for RF, FRN and reflector routing,
+DTMF controls and the "Hey Jarvis" wake phrase.
+
 == Qtel ==
 Qtel, the Qt EchoLink client, is a graphical application used to access the
 EchoLink network.

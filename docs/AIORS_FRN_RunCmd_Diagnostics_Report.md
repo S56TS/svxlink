@@ -2,12 +2,13 @@
 
 Originally generated from the local SvxLink and AIORS workspaces on 2026-08-23.
 Software identity reporting and LED integration notes updated on 2026-10-20.
+Four-radio diagnostics and FRN status commands updated on 2026-10-30.
 
 ## Summary
 
 The FRN messages module implements a private text-message command bridge named `RunCmd`. Incoming FRN text messages are parsed by `QsoFrn`, emitted to `ModuleFrn`, validated against a small allowlist, and then answered with FRN private text messages prefixed with `CmdReply:`.
 
-There are seven allowlisted RunCmd commands:
+The following RunCmd commands are allowlisted:
 
 | RunCmd command | Implemented behavior | Data source |
 | --- | --- | --- |
@@ -18,6 +19,8 @@ There are seven allowlisted RunCmd commands:
 | `get psu b` | Runs external `aiorsctl get psu b`. | AIORS controller via `aiorsctl` |
 | `get psu all` | Runs external `aiorsctl get psu all`. | AIORS controller via `aiorsctl` |
 | `get temp all` | Runs external `aiorsctl get temp all`. | AIORS controller via `aiorsctl` |
+| `get radio status ai` / `bi` / `ae` / `be` | Reports one physical radio's type, lifecycle state, and management status. | AIORS controller via `aiorsctl` |
+| `get radio status all` | Reports all four physical radio ports. | AIORS controller via `aiorsctl` |
 
 The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It wraps SvxLink RX/TX Tcl event procedures and queues LED states through the native `aiorsSetLed` command. Version, PSU, and temperature RunCmd commands use the external AIORS control entry point, `aiorsctl`.
 
@@ -214,6 +217,32 @@ The data path is:
 | RF TX | `Logic::transmitterStateChange` calls `SvxStats::onRfTxState`. |
 | RunCmd command metrics | `ModuleFrn::onTextMessageReceived` increments accepted, rejected, auth-failure, broadcast-attempt, and execution-time counters. |
 | Periodic stats logging | `svxlink.cpp` starts `SvxStats` using `[GLOBAL] STATS_INTERVAL` and persists totals using `[GLOBAL] STATS_PERSIST_PATH`. |
+
+### Four physical radios
+
+With AIORS diagnostics collection enabled, `get stats` adds a compact `RADIOS`
+reply, for example:
+
+```text
+RADIOS ai=ready bi=ready ae=disabled be=unimplemented sample_ok=1 age=12s
+```
+
+These are physical AI/BI/AE/BE states, independent of audio/PTT/COS routing.
+`sample_ok` and `age` describe freshness; states come from the last successful
+sample. Diagnostics version 4 remains supported but cannot establish physical
+port identity, so these states are `na`. Version 5 requires all four states.
+
+For a live status request, use `RunCmd: get radio status all` (with the existing
+secret syntax if configured). It returns type, state, and whether a driver
+manages each port. This requires the updated AIORS daemon. The same command can
+target `ai`, `bi`, `ae`, or `be`; arbitrary commands remain rejected.
+
+Periodic snapshots include `aiors_radio_<port>_status` and separate per-port
+fault events, samples, and duration for 1h, 24h, and lifetime totals. Disabled
+ports and external driver placeholders (`unimplemented`) accumulate no faults.
+The legacy A/B metrics remain available; with version 5 they refer to AI/BI
+and use `na` while disabled or unimplemented. Existing historical counters are
+preserved; new physical-port lifetime counters start separately.
 
 ### AIORS hardware diagnostics
 

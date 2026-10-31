@@ -1,0 +1,20 @@
+[Unit]
+Description=SvxLink AI voice bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@SVXLINK_USER@
+Group=@SVXLINK_GROUP@
+EnvironmentFile=-@SVX_SYSCONF_INSTALL_DIR@/chat.env
+ExecStart=/opt/svxlink-chat/bin/python @SVX_SHARE_INSTALL_DIR@/chat/svxlink_chat.py --config @SVX_SYSCONF_INSTALL_DIR@/chat.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

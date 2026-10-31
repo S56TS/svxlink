@@ -602,6 +602,11 @@ static inline const std::vector<std::string>& supportedRunCmds()
     "get psu b",
     "get psu all",
     "get temp all",
+    "get radio status ai",
+    "get radio status bi",
+    "get radio status ae",
+    "get radio status be",
+    "get radio status all",
     "help"
   };
   return cmds;

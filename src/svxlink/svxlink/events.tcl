@@ -52,6 +52,10 @@ sourceTclOverrides "${::logic_name}.tcl"
 # Enable support for legacy TCL code
 enableLegacySupport
 
+# Install optional controls after site overrides; unrelated DTMF commands
+# continue through the handler that the site installed.
+source "${::basedir}/events.d/ChatControl.tcl"
+
 printInfo "Event handler script successfully loaded.";
 
 #printNamespaceTree

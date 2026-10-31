@@ -6,14 +6,14 @@ set(SVXLINK_SRCS
 
 # TCL event handler files to install in the events.d subdirectory
 set(SVXLINK_TCL_EVENT_FILES
-  Module.tcl CW.tcl SelCall.tcl locale.tcl LogicBase.tcl Logic.tcl
+  Module.tcl CW.tcl SelCall.tcl locale.tcl LogicBase.tcl Logic.tcl ChatControl.tcl
   SimplexLogicType.tcl RepeaterLogicType.tcl ReflectorLogicType.tcl
   ReflectorV2LogicType.tcl SimplexLogic.tcl RepeaterLogic.tcl ReflectorLogic.tcl
   )
 
 # Logic core plugins to build
 set(SVXLINK_LOGIC_CORES
-  Dummy Simplex Repeater ReflectorV2 Reflector
+  Dummy Simplex Repeater ReflectorV2 Reflector Chat
   )
 
 # Find the popt library
@@ -97,6 +97,14 @@ foreach(logic_name ${SVXLINK_LOGIC_CORES})
   #target_link_libraries(${logic_name}Logic ${LIBS})
 endforeach()
 
+# Hardware-free integration fixture, never installed on a repeater.
+option(BUILD_CHAT_TESTS "Build the ChatLogic audio integration fixture" OFF)
+if(BUILD_CHAT_TESTS)
+  add_library(ChatTestLogic MODULE ../../../tests/chat_test_logic.cpp)
+  target_include_directories(ChatTestLogic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  set_target_properties(ChatTestLogic PROPERTIES PREFIX "")
+endif()
+
 # Generate config file with correct paths
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/svxlink.conf.in
   ${CMAKE_CURRENT_BINARY_DIR}/svxlink.conf
@@ -141,3 +149,4 @@ endforeach()
 
 # Include contributed parts
 add_subdirectory(contrib)
+add_subdirectory(chat)

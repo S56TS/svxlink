@@ -2579,6 +2579,7 @@ void ReflectorLogic::selectTg(uint32_t tg, const std::string& event, bool unmute
       m_previous_tg = m_selected_tg;
     }
     m_selected_tg = tg;
+    publishStateEvent("Reflector:tg_selected", std::to_string(tg));
     if (tg == 0)
     {
       m_tg_local_activity = false;

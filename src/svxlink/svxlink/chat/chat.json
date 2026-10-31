@@ -1,0 +1,12 @@
+{
+  "port": 5301,
+  "model": "gpt-realtime-2.1",
+  "voice": "marin",
+  "wake_enabled": true,
+  "wake_model": "hey_jarvis",
+  "wake_threshold": 0.6,
+  "idle_seconds": 45,
+  "max_utterance_seconds": 45,
+  "max_reply_seconds": 30,
+  "response_timeout_seconds": 45
+}

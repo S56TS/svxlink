@@ -87,7 +87,7 @@ Example envelope:
   "metrics": {
     "stats_schema": 3,
     "ts_unix_s": 1787574600,
-    "aiors_diagnostics_version": "4",
+    "aiors_diagnostics_version": "5",
     "aiors_software_version": "4f165e5-dirty",
     "aiors_software_revision": "4f165e5-dirty",
     "aiors_hardware_version": "1.0",
@@ -168,10 +168,46 @@ FRN `get version` forwards the daemon identity alongside SvxLink's own version.
 
 Protocol schemas remain separate from software identity: MQTT `schema` stays
 numeric `1`, the topic prefix stays `frn/aiors/v1`, snapshot `stats_schema`
-stays numeric `3`, and AIORS `diagnostics_version` stays `4`. The last field
-appears as `"aiors_diagnostics_version": "4"` in MQTT because keys containing
-`version` are serialized as strings. No topic or schema migration is needed
-for this software version change.
+stays numeric `3`. AIORS diagnostics version `5` adds four physical radio
+states; version `4` remains supported. `aiors_diagnostics_version` is serialized
+as a string because its key contains `version`. No topic or envelope schema
+migration is needed.
+
+### Four physical radio ports
+
+Telemetry includes these string metrics, independent of audio/PTT/COS routing:
+
+| Metric | Physical port |
+|---|---|
+| `aiors_radio_ai_status` | Internal A |
+| `aiors_radio_bi_status` | Internal B |
+| `aiors_radio_ae_status` | External A |
+| `aiors_radio_be_status` | External B |
+
+States are `ready`, `disabled`, `unimplemented`, `absent`, `mismatch`,
+`config_error`, or `uninitialized`. Each state change produces the existing
+`metric_changed` event with `previous` and `current` values. Repeated unchanged
+samples produce no duplicate event. Initial observations establish a baseline.
+
+Each port also has numeric `aiors_radio_<port>_fault_evt_<window>`,
+`aiors_radio_<port>_fault_samples_<window>`, and
+`aiors_radio_<port>_fault_s_<window>` metrics, where `<window>` is `1h`, `24h`,
+or `total`. `disabled` and `unimplemented` do not accumulate faults. Other
+non-ready states count as faults. External placeholders therefore remain
+visible without creating false failures.
+
+The legacy `aiors_sa818_a_status` / `aiors_sa818_b_status` metrics and counters
+remain available. With diagnostics version 5, they follow physical AI/BI and
+their status becomes JSON `null` when the radio is disabled or unimplemented.
+With version 4, they retain the older A/B semantics; all four explicit physical
+status metrics are JSON `null` because physical identity is unavailable.
+Existing historical counters are retained, while new physical-port totals
+start separately. State values in change events are strings, including `na`
+for unknown values; telemetry represents `na` as JSON `null`.
+
+Use `aiors_sample_ok`, sample age, and the existing freshness fields to judge
+whether a reported state is current. A failed sample keeps the last successful
+radio state, rather than claiming a new hardware state.
 
 ## Snapshot sampling and fields
 

@@ -9,6 +9,7 @@ set(SYSTEMD_DEFAULTS_FILES_DIR "${SYSCONF_INSTALL_DIR}/default" CACHE PATH
 
 configure_file(svxlink_gpio_setup.service.in svxlink_gpio_setup.service @ONLY)
 configure_file(svxlink.service.in svxlink.service @ONLY)
+configure_file(svxlink-chat.service.in svxlink-chat.service @ONLY)
 configure_file(remotetrx.service.in remotetrx.service @ONLY)
 configure_file(svxreflector.service.in svxreflector.service @ONLY)
 configure_file(svxlink.default.in svxlink @ONLY)
@@ -17,6 +18,7 @@ configure_file(svxreflector.default.in svxreflector @ONLY)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/svxlink_gpio_setup.service
               ${CMAKE_CURRENT_BINARY_DIR}/svxlink.service
+              ${CMAKE_CURRENT_BINARY_DIR}/svxlink-chat.service
               ${CMAKE_CURRENT_BINARY_DIR}/remotetrx.service
               ${CMAKE_CURRENT_BINARY_DIR}/svxreflector.service
         DESTINATION ${SYSTEMD_CONFIGURATIONS_FILES_DIR})
