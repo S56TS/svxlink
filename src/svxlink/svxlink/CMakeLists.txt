@@ -103,6 +103,9 @@ if(BUILD_CHAT_TESTS)
   add_library(ChatTestLogic MODULE ../../../tests/chat_test_logic.cpp)
   target_include_directories(ChatTestLogic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   set_target_properties(ChatTestLogic PROPERTIES PREFIX "")
+  add_library(VirtualRadioLogic MODULE ../../../tests/virtual_radio_logic.cpp)
+  target_include_directories(VirtualRadioLogic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  set_target_properties(VirtualRadioLogic PROPERTIES PREFIX "")
 endif()
 
 # Generate config file with correct paths

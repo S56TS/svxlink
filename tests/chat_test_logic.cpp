@@ -21,6 +21,7 @@ public:
     config.getValue(name, "INPUT_FILE", input);
     config.getValue(name, "OUTPUT_FILE", output);
     config.getValue(name, "SECOND_MS", second_ms);
+    config.getValue(name, "START_MS", start_ms);
     config.getValue(name, "STOP_ON_PLAY", stop_on_play);
     std::ifstream file(input, std::ios::binary);
     int16_t value;
@@ -43,20 +44,27 @@ private:
   Async::Timer timer;
   std::vector<float> samples;
   std::ofstream recording;
-  unsigned elapsed = 0, second_ms = 0;
+  unsigned elapsed = 0, second_ms = 0, start_ms = 500;
   size_t position = 0;
   bool sending = false;
   bool stop_on_play = false;
   void tick()
   {
     elapsed += 20;
-    if (elapsed == 500 || (second_ms && elapsed == second_ms))
-    { sending = true; position = 0; setIdle(false); }
+    if (elapsed == start_ms || (second_ms && elapsed == second_ms))
+    {
+      std::cout << "TEST fixture " << name() << " start " << elapsed << std::endl;
+      sending = true; position = 0; setIdle(false);
+    }
     if (!sending) return;
     int n = std::min<size_t>(INTERNAL_SAMPLE_RATE/50, samples.size()-position);
     int accepted = sinkWriteSamples(samples.data()+position, n);
     if (accepted > 0) position += accepted;
-    if (position == samples.size()) { sending = false; sinkFlushSamples(); }
+    if (position == samples.size())
+    {
+      std::cout << "TEST fixture " << name() << " sent " << position << std::endl;
+      sending = false; sinkFlushSamples();
+    }
   }
   int writeSamples(const float* audio, int count) override
   {

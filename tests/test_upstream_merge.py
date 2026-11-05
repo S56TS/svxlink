@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--sysroot', type=Path, required=True)
+    parser.add_argument('--only', choices=('all', 'timing'), default='all')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     build, sysroot = args.build.resolve(), args.sysroot.resolve()
@@ -26,7 +27,8 @@ def main():
     libdirs = [build / 'lib', sysroot / 'usr/lib/aarch64-linux-gnu', sysroot / 'lib/aarch64-linux-gnu']
     compiler = ['aarch64-linux-gnu-g++', '--sysroot=' + str(sysroot), '-std=c++11', '-O0', '-g',
                 '-Wall', '-Wextra', '-ffunction-sections', '-fdata-sections', '-DINTERNAL_SAMPLE_RATE=16000',
-                *includes, '-I' + str(root / 'src/svxlink/modules/frn')]
+                *includes, '-I' + str(root / 'src/svxlink/modules/frn'),
+                '-I' + str(root / 'src/async/audio')]
     # Match CMake's direct dependency paths. Do not add the extracted sysroot
     # to -L: its libc linker scripts can refer to absent /lib paths.
     target_lib = sysroot / 'usr/lib/aarch64-linux-gnu'
@@ -34,8 +36,20 @@ def main():
               '-Wl,-rpath-link,' + ':'.join(str(p) for p in libdirs),
               '-lasynccpp', '-lasyncaudio', '-lasynccore', '-lresolv', str(target_lib / 'libsigc-2.0.so'),
               str(target_lib / 'libgsm.so'), '-pthread']
+    def run_timing(temp):
+        timing = temp / 'tx-timing'
+        subprocess.run([*compiler, str(root / 'tests/tx_timing.cpp'),
+                        str(root / 'src/svxlink/trx/PttCtrl.cpp'),
+                        *linker, '-o', str(timing)], check=True)
+        for delay in (0, 100, 300, 600):
+            subprocess.run(['qemu-aarch64-static', '-L', str(sysroot), '-E',
+                            'LD_LIBRARY_PATH=' + ':'.join(str(p) for p in libdirs),
+                            str(timing), str(delay)], check=True, timeout=8)
     with tempfile.TemporaryDirectory(prefix='svxlink-merge-tests-') as directory:
         temp = Path(directory)
+        if args.only == 'timing':
+            run_timing(temp)
+            return
         hidraw = temp / 'hidraw'
         sources = [root / 'tests/hidraw_recovery.cpp',
                    *[root / 'src/svxlink/trx' / name for name in
@@ -71,6 +85,7 @@ public:
             subprocess.run(['qemu-aarch64-static', '-L', str(sysroot), '-E',
                             'LD_LIBRARY_PATH=' + ':'.join(str(p) for p in libdirs), str(executable)],
                            check=True, timeout=45)
+        run_timing(temp)
 
 
 if __name__ == '__main__':

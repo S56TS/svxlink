@@ -761,6 +761,13 @@ bool Logic::initialize(Async::Config& cfgobj, const std::string& logic_name)
 
 void Logic::processEvent(const string& event, const Module *module)
 {
+  // Disconnecting an active audio chain during cleanup may still emit stream
+  // state changes (and a roger event) after the Tcl handler was destroyed.
+  // Never run scripts or enqueue announcements against that partial graph.
+  if ((event_handler == nullptr) || (msg_handler == nullptr))
+  {
+    return;
+  }
   msg_handler->begin();
   if (module == 0)
   {

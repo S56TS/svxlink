@@ -104,6 +104,11 @@ ARM64 CMake build before running `chat_native.py`.
 
 ## Validation still needed on AIORS hardware
 
+Follow-up software and virtual checks, including two discovered fixes and the
+combined FRN/RF/chat routing test, are recorded in
+[AIORS_VIRTUAL_VALIDATION.md](AIORS_VIRTUAL_VALIDATION.md). That report narrows
+the remaining physical-device and live-service checks below.
+
 1. Verify normal and inverted PTT on each installed USB interface, including
    the first transmission after unplugging and reconnecting it. Confirm PTT
    releases correctly and that the radio's configured TX delay is respected.
