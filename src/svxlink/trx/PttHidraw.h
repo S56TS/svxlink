@@ -6,7 +6,7 @@
 
 \verbatim
 SvxLink - A Multi Purpose Voice Services System for Ham Radio Use
-Copyright (C) 2003-2014 Tobias Blomberg / SM0SVX
+Copyright (C) 2003-2026 Tobias Blomberg / SM0SVX
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -39,6 +39,14 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 /****************************************************************************
  *
+ * Project Includes
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
  * Local Includes
  *
  ****************************************************************************/
@@ -48,10 +56,55 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 /****************************************************************************
  *
+ * Forward declarations
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Namespace
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Forward declarations of classes inside of the declared namespace
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Defines & typedefs
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Exported Global Variables
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
  * Class definitions
  *
  ****************************************************************************/
 
+/**
+@brief  A PTT hardware controller using the Hidraw-Board from DMK
+@author Tobias Blomberg / SM0SVX
+@date   2014-09-17
+*/
 class PttHidraw : public Ptt
 {
   public:
@@ -60,28 +113,46 @@ class PttHidraw : public Ptt
       Factory(void) : PttFactory<PttHidraw>("Hidraw") {}
     };
 
+    /**
+     * @brief 	Default constructor
+     */
     PttHidraw(void);
-    ~PttHidraw(void);
 
-    virtual bool initialize(Async::Config &cfg, const std::string name);
-    virtual bool setTxOn(bool tx_on);
+    /**
+     * @brief 	Destructor
+     */
+    virtual ~PttHidraw(void);
+
+    /**
+     * @brief 	Initialize the PTT hardware
+     * @param 	cfg An initialized config object
+     * @param   name The name of the config section to read config from
+     * @returns Returns \em true on success or else \em false
+     */
+    virtual bool initialize(Async::Config& cfg,
+                            const std::string name) override;
+
+    /**
+     * @brief 	Set the state of the PTT, TX on or off
+     * @param 	tx_on Set to \em true to turn the transmitter on
+     * @returns Returns \em true on success or else \em false
+     */
+    virtual bool setTxOn(bool tx_on) override;
 
   protected:
 
   private:
-    bool active_low;
-
-    std::string device;
-    bool        disconnected_logged;
-
-    int   fd;
-    char  pin;
-
-    bool openDevice(void);
-    void closeDevice(void);
+    bool            m_active_low  {false};
+    int             m_fd          {-1};
+    char            m_pin         {0};
+    Async::Config*  m_cfg         {nullptr};
+    std::string     m_tx_name;
+    bool            m_disconnected_logged {false};
 
     PttHidraw(const PttHidraw&);
     PttHidraw& operator=(const PttHidraw&);
+    bool openDevice(void);
+    void closeDevice(void);
 
 };  /* class PttHidraw */
 

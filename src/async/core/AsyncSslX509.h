@@ -6,7 +6,7 @@
 
 \verbatim
 Async - A library for programming event driven applications
-Copyright (C) 2003-2025 Tobias Blomberg / SM0SVX
+Copyright (C) 2003-2026 Tobias Blomberg / SM0SVX
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -821,6 +821,21 @@ class SslX509
     }
 
     /**
+     * @brief   Get the subject alternative names extension
+     * @return  Returns the SAN extension (null object if there is none)
+     */
+    SslX509ExtSubjectAltName subjectAltName(void) const
+    {
+      assert(m_cert != nullptr);
+      int ext_idx = X509_get_ext_by_NID(m_cert, NID_subject_alt_name, -1);
+      if (ext_idx < 0)
+      {
+        return nullptr;
+      }
+      return X509_get_ext(m_cert, ext_idx);
+    }
+
+    /**
      * @brief   Get the public key
      * @retrun  Returns the public key
      */
@@ -904,22 +919,24 @@ class SslX509
     }
 
     /**
-     * @brief   Print this certificate to std::cout
-     * @param   prefix A prefix to add to each printed row
+     * @brief   Get the certificate as a string
+     * @param   prefix A string to prefix each row with
+     * @return  Returns the certificate as a string
      */
-    void print(const std::string& prefix="") const
+    std::string toString(const std::string& prefix="") const
     {
       if (isNull())
       {
-        std::cout << "NULL" << std::endl;
-        return;
+        return std::string(prefix + "NULL");
       }
 
       int ext_idx = X509_get_ext_by_NID(m_cert, NID_subject_alt_name, -1);
       auto ext = X509_get_ext(m_cert, ext_idx);
       auto sanstr = SslX509ExtSubjectAltName(ext).toString();
       const auto md = digest();
-      std::cout
+      std::ostringstream ss;
+
+      ss
         //<< prefix << "Version          : " << (version()+1) << "\n"
         << prefix << "Serial No.       : " << serialNumberString() << "\n"
         << prefix << "Issuer           : " << issuerNameString() << "\n"
@@ -932,9 +949,9 @@ class SslX509
         ;
       if (!sanstr.empty())
       {
-        std::cout << prefix << "Subject Alt Name : " << sanstr << "\n";
+        ss << prefix << "Subject Alt Name : " << sanstr << "\n";
       }
-      //std::cout << prefix << "SHA256 Digest    : " << std::accumulate(
+      //ss << prefix << "SHA256 Digest    : " << std::accumulate(
       //    md.begin(),
       //    md.end(),
       //    std::ostringstream() << std::hex << std::setfill('0'),
@@ -943,6 +960,46 @@ class SslX509
       //      if (!ss.str().empty()) { ss << ":"; }
       //      return std::move(ss) << std::setw(2) << unsigned(x);
       //    }).str() + "\n"
+      return ss.str();
+    }
+
+    /**
+     * @brief   Get a verbose, human readable dump of the certificate
+     * @return  Returns the certificate in text form
+     *
+     * The output is similar to that of "openssl x509 -text -noout" except
+     * that the signature dump is left out.
+     */
+    std::string toText(void) const
+    {
+      if (isNull())
+      {
+        return std::string();
+      }
+      std::string str;
+      BIO *mem = BIO_new(BIO_s_mem());
+      assert(mem != nullptr);
+      if (X509_print_ex(mem, m_cert, XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB,
+                        X509_FLAG_NO_SIGDUMP) == 1)
+      {
+        char *buf = nullptr;
+        long len = BIO_get_mem_data(mem, &buf);
+        if ((len > 0) && (buf != nullptr))
+        {
+          str = std::string(buf, len);
+        }
+      }
+      BIO_free(mem);
+      return str;
+    }
+
+    /**
+     * @brief   Print this certificate to std::cout
+     * @param   prefix A prefix to add to each printed row
+     */
+    void print(const std::string& prefix="") const
+    {
+      std::cout << toString(prefix);
       std::cout << std::flush;
     }
 

@@ -6,7 +6,7 @@
 
 \verbatim
 SvxReflector - An audio reflector for connecting SvxLink Servers
-Copyright (C) 2003-2024 Tobias Blomberg / SM0SVX
+Copyright (C) 2003-2026 Tobias Blomberg / SM0SVX
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -95,6 +95,28 @@ class ReflectorUdpMsg;
  * Defines & typedefs
  *
  ****************************************************************************/
+
+/**
+ * @brief Structure to hold certificate or CSR information
+ *
+ * - Signed certificates (is_signed=true, has valid_until/not_after)
+ * - Pending CSRs (is_signed=false, has received_time)
+ */
+struct CertInfo
+{
+  std::string callsign;            // Common Name
+  std::vector<std::string> emails; // Email addresses from SAN
+  bool is_signed;                  // true=signed cert, false=pending CSR
+
+    // For signed certificates:
+  std::string valid_until;         // Human-readable expiry date
+  time_t not_after;                // Unix timestamp for expiry (0 if pending)
+
+    // For pending CSRs:
+  time_t received_time;            // Unix timestamp when CSR received (0 if cert)
+
+  CertInfo() : is_signed(false), not_after(0), received_time(0) {}
+};
 
 
 
@@ -205,13 +227,19 @@ class Reflector : public sigc::trackable
     std::string clientCertPem(const std::string& callsign) const;
     std::string caBundlePem(void) const;
     std::string issuingCertPem(void) const;
-    bool callsignOk(const std::string& callsign) const;
+    bool callsignOk(const std::string& callsign, bool verbose=true) const;
     bool reqEmailOk(const Async::SslCertSigningReq& req) const;
     bool emailOk(const std::string& email) const;
     std::string checkCsr(const Async::SslCertSigningReq& req);
     Async::SslX509 csrReceived(Async::SslCertSigningReq& req);
 
     Json::Value& clientStatus(const std::string& callsign);
+
+    /**
+     * @brief   Called from the ReflectorClient class
+     */
+    void clientDisconnectCleanup(Async::FramedTcpConnection *con,
+                            Async::FramedTcpConnection::DisconnectReason reason);
 
   protected:
 
@@ -235,6 +263,7 @@ class Reflector : public sigc::trackable
     uint32_t                    m_random_qsy_hi;
     uint32_t                    m_random_qsy_tg;
     HttpServer*                 m_http_server;
+    HttpServer*                 m_http_admin_server = nullptr;
     Async::Pty*                 m_cmd_pty;
     Async::SslContext           m_ssl_ctx;
     std::string                 m_keys_dir;
@@ -260,8 +289,6 @@ class Reflector : public sigc::trackable
     Reflector(const Reflector&);
     Reflector& operator=(const Reflector&);
     void clientConnected(Async::FramedTcpConnection *con);
-    void clientDisconnected(Async::FramedTcpConnection *con,
-                            Async::FramedTcpConnection::DisconnectReason reason);
     bool udpCipherDataReceived(const Async::IpAddress& addr, uint16_t port,
                                void *buf, int count);
     void udpDatagramReceived(const Async::IpAddress& addr, uint16_t port,
@@ -273,6 +300,9 @@ class Reflector : public sigc::trackable
     void httpClientConnected(Async::HttpServerConnection *con);
     void httpClientDisconnected(Async::HttpServerConnection *con,
         Async::HttpServerConnection::DisconnectReason reason);
+    void httpAdminClientConnected(Async::HttpServerConnection *con);
+    void httpAdminRequestReceived(Async::HttpServerConnection *con,
+                                  Async::HttpServerConnection::Request& req);
     void onRequestAutoQsy(uint32_t from_tg);
     uint32_t nextRandomQsyTg(void);
     void ctrlPtyDataReceived(const void *buf, size_t count);
@@ -286,9 +316,17 @@ class Reflector : public sigc::trackable
                       X509_STORE_CTX *x509_store_ctx);
     bool buildPath(const std::string& sec, const std::string& tag,
                    const std::string& defdir, std::string& defpath);
-    bool removeClientCert(const std::string& cn);
+    bool removeClientCertFiles(const std::string& cn);
     void runCAHook(const Async::Exec::Environment& env);
-
+    std::vector<CertInfo> getAllCerts(void);
+    std::vector<CertInfo> getAllPendingCSRs(void);
+    std::string formatCerts(bool signedCerts=true, bool pendingCerts=true);
+    std::vector<std::string> listCallsignFiles(const std::string& dir,
+                                               const std::string& ext) const;
+    std::string pendingCsrCallsign(const std::string& id) const;
+    std::string clientCertCallsign(const std::string& id) const;
+    bool readClientCertFile(const std::string& callsign,
+                            Async::SslX509& cert) const;
 };  /* class Reflector */
 
 

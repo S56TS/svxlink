@@ -6,7 +6,7 @@
 
 \verbatim
 SvxLink - A Multi Purpose Voice Services System for Ham Radio Use
-Copyright (C) 2003-2014 Tobias Blomberg / SM0SVX
+Copyright (C) 2003-2026 Tobias Blomberg / SM0SVX
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -44,6 +44,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  ****************************************************************************/
 
+#include <AsyncTimer.h>
+#include <AsyncFdWatch.h>
 
 
 /****************************************************************************
@@ -61,10 +63,40 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  ****************************************************************************/
 
-namespace Async
-{
-  class Timer;
-};
+
+
+/****************************************************************************
+ *
+ * Namespace
+ *
+ ****************************************************************************/
+
+//namespace MyNameSpace
+//{
+
+
+/****************************************************************************
+ *
+ * Forward declarations of classes inside of the declared namespace
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Defines & typedefs
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Exported Global Variables
+ *
+ ****************************************************************************/
+
 
 
 /****************************************************************************
@@ -109,29 +141,31 @@ class SquelchHidraw : public Squelch
   protected:
 
   private:
-    int             fd;
-    Async::FdWatch  *watch;
-    Async::Timer    *reopen_timer;
-    std::string     device;
-    std::string     rx_name;
-    unsigned        reopen_delay_ms;
-    bool            disconnected_logged;
-    bool            active_low;
-    char            pin;
+    int             m_fd            {-1};
+    Async::FdWatch  m_watch;
+    bool            m_active_low    {false};
+    char            m_pin           {0};
+    Async::Config*  m_cfg           {nullptr};
+    std::string     m_rx_name;
+    Async::Timer    m_reopen_timer  {250, Async::Timer::TYPE_ONESHOT, false};
+    unsigned        m_reopen_delay_ms {250};
+    bool            m_disconnected_logged {false};
 
     SquelchHidraw(const SquelchHidraw&);
     SquelchHidraw& operator=(const SquelchHidraw&);
-    void hidrawActivity(Async::FdWatch *watch);
-
-    void closeDevice(void);
     bool openDevice(void);
-    void scheduleReopen(unsigned delay_ms);
-    void tryReopen(Async::Timer *t);
+    void closeDevice(void);
+    void hidrawActivity(void);
+    void scheduleReopen(void);
+    void tryReopen(void);
 
 };  /* class SquelchHidraw */
 
 
+//} /* namespace */
+
 #endif /* SQUELCH_HIDRAW_INCLUDED */
+
 
 
 /*

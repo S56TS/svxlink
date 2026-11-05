@@ -6,7 +6,7 @@
 
 \verbatim
 SvxLink - A Multi Purpose Voice Services System for Ham Radio Use
-Copyright (C) 2003-2014 Tobias Blomberg / SM0SVX
+Copyright (C) 2003-2026 Tobias Blomberg / SM0SVX
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -33,12 +33,20 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include <iostream>
-#include <cstring>
 #include <cerrno>
 #include <unistd.h>
 #include <fcntl.h>
 #include <linux/hidraw.h>
 #include <sys/ioctl.h>
+
+
+/****************************************************************************
+ *
+ * Project Includes
+ *
+ ****************************************************************************/
+
+#include <common.h>
 
 
 /****************************************************************************
@@ -58,7 +66,46 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 using namespace std;
-using namespace Async;
+
+
+
+/****************************************************************************
+ *
+ * Defines & typedefs
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Local class definitions
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Prototypes
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Exported Global Variables
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Local Global Variables
+ *
+ ****************************************************************************/
 
 
 
@@ -69,7 +116,6 @@ using namespace Async;
  ****************************************************************************/
 
 PttHidraw::PttHidraw(void)
-  : active_low(false), device(), disconnected_logged(false), fd(-1), pin(0)
 {
 } /* PttHidraw::PttHidraw */
 
@@ -80,38 +126,91 @@ PttHidraw::~PttHidraw(void)
 } /* PttHidraw::~PttHidraw */
 
 
-bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
+bool PttHidraw::initialize(Async::Config& cfg, const std::string name)
 {
-  map<string, char> pin_mask;
-  pin_mask["GPIO1"] = 0x01;
-  pin_mask["GPIO2"] = 0x02;
-  pin_mask["GPIO3"] = 0x04;
-  pin_mask["GPIO4"] = 0x08;
+  m_cfg = &cfg;
+  m_tx_name = name;
 
-  string hidraw_pin;
-  if (!cfg.getValue(name, "HID_PTT_PIN", hidraw_pin) || hidraw_pin.empty())
+  return openDevice();
+} /* PttHidraw::initialize */
+
+
+
+/****************************************************************************
+ *
+ * Protected member functions
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Private member functions
+ *
+ ****************************************************************************/
+
+bool PttHidraw::openDevice(void)
+{
+  closeDevice();
+  static const std::map<string, char> pin_mask{
+    {"GPIO1", 0x01},
+    {"GPIO2", 0x02},
+    {"GPIO3", 0x04},
+    {"GPIO4", 0x08}
+  };
+
+  std::string hidraw_dev;
+  if (!m_cfg->getValue(m_tx_name, "HID_DEVICE", hidraw_dev) ||
+      hidraw_dev.empty())
   {
-    cerr << "*** ERROR: Config variable " << name << "/HID_PTT_PIN not set\n";
+    std::cerr << "*** ERROR: Config variable " << m_tx_name
+              << "/HID_DEVICE not set"
+              << std::endl;
     return false;
   }
 
-  string hidraw_dev;
-  if (!cfg.getValue(name, "HID_DEVICE", hidraw_dev) || hidraw_dev.empty())
+  std::string hidraw_pin;
+  if (!m_cfg->getValue(m_tx_name, "HID_PTT_PIN", hidraw_pin) ||
+      hidraw_pin.empty())
   {
-    cerr << "*** ERROR: Config variable " << name << "/HID_DEVICE not set\n";
+    std::cerr << "*** ERROR: Config variable " << m_tx_name
+              << "/HID_PTT_PIN not set"
+              << std::endl;
     return false;
   }
 
-  device = hidraw_dev;
-  if (!openDevice())
+  if (hidraw_pin[0] == '!')
   {
-    cerr << "*** ERROR: Can't open port " << device << ": "
-         << strerror(errno) << endl;
+    m_active_low = true;
+    hidraw_pin.erase(0, 1);
+  }
+
+  auto it = pin_mask.find(hidraw_pin);
+  if (it == pin_mask.end())
+  {
+    std::cerr << "*** ERROR: Wrong value for " << m_tx_name << "/HID_PTT_PIN="
+              << hidraw_pin << ", valid values are GPIO1, GPIO2, GPIO3, GPIO4"
+              << std::endl;
+    return false;
+  }
+  m_pin = (*it).second;
+
+  if ((m_fd = ::open(hidraw_dev.c_str(), O_WRONLY, 0)) < 0)
+  {
+    if (!m_disconnected_logged)
+    {
+      std::cerr << "*** ERROR: Can't open HIDRAW device '" << hidraw_dev
+                << "': " << SvxLink::strError(errno) << " -- will retry"
+                << std::endl;
+      m_disconnected_logged = true;
+    }
+    closeDevice();
     return false;
   }
 
   struct hidraw_devinfo hiddevinfo;
-  if ((ioctl(fd, HIDIOCGRAWINFO, &hiddevinfo) != -1) &&
+  if ((::ioctl(m_fd, HIDIOCGRAWINFO, &hiddevinfo) != -1) &&
       (hiddevinfo.vendor == 0x0d8c))
   {
     cout << "--- Hidraw sound chip is ";
@@ -148,79 +247,64 @@ bool PttHidraw::initialize(Async::Config &cfg, const std::string name)
   else
   {
     cerr << "*** ERROR: unknown/unsupported sound chip detected...\n";
+    closeDevice();
     return false;
   }
-
-  if (!hidraw_pin.empty() && hidraw_pin[0] == '!')
-  {
-    active_low = true;
-    hidraw_pin.erase(0, 1);
-  }
-
-  map<string, char>::iterator it = pin_mask.find(hidraw_pin);
-  if (it == pin_mask.end())
-  {
-    cerr << "*** ERROR: Wrong value for " << name << "/HID_PIN=" << hidraw_pin
-         << ", valid are GPIO1, GPIO2, GPIO3, GPIO4" << endl;
-    return false;
-  }
-  pin = (*it).second;
 
   return true;
-} /* PttHidraw::initialize */
+} /* PttHidraw::openDevice */
+
+
+void PttHidraw::closeDevice(void)
+{
+  m_active_low = false;
+  m_pin = 0;
+
+  if (m_fd >= 0)
+  {
+    ::close(m_fd);
+    m_fd = -1;
+  }
+} /* PttHidraw::closeDevice */
 
 
 bool PttHidraw::setTxOn(bool tx_on)
 {
-  char a[5] = {'\000', '\000',
-              (tx_on ^ active_low ? pin : '\000'), pin, '\000'};
-
-  if (fd < 0 && !openDevice())
+  // Reopening reloads the pin and its polarity. Build the report afterwards,
+  // including on the first PTT transition after a USB reconnect.
+  if ((m_fd < 0) && !openDevice())
   {
     return false;
   }
 
-  if (write(fd, a, sizeof(a)) == -1)
+  const char a[5] = {
+    '\000',
+    '\000',
+    (tx_on ^ m_active_low ? m_pin : '\000'),
+    m_pin,
+    '\000'
+  };
+
+  ssize_t written;
+  do { written = ::write(m_fd, a, sizeof(a)); }
+  while ((written < 0) && (errno == EINTR));
+  if (written != static_cast<ssize_t>(sizeof(a)))
   {
-    // Typical after USB disconnect: ENODEV/EIO/EBADF. Close and let next TX retry.
-    if (!disconnected_logged)
+    if (written >= 0) errno = EIO;
+    if (!m_disconnected_logged)
     {
-      cerr << "*** ERROR: writing HID_DEVICE (" << device << ") failed: "
-           << strerror(errno) << " -- will retry" << endl;
-      disconnected_logged = true;
+      std::cerr << "*** ERROR: Failed to write to HIDRAW device: "
+                << SvxLink::strError(errno)
+                << " -- will retry" << std::endl;
+      m_disconnected_logged = true;
     }
     closeDevice();
     return false;
   }
 
-  disconnected_logged = false;
+  m_disconnected_logged = false;
   return true;
 } /* PttHidraw::setTxOn */
-
-
-void PttHidraw::closeDevice(void)
-{
-  if (fd >= 0)
-  {
-    close(fd);
-    fd = -1;
-  }
-}
-
-
-bool PttHidraw::openDevice(void)
-{
-  closeDevice();
-  if (device.empty())
-  {
-    errno = EINVAL;
-    return false;
-  }
-
-  fd = open(device.c_str(), O_WRONLY, 0);
-  return (fd >= 0);
-}
-
 
 
 /*
