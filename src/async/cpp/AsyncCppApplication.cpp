@@ -253,7 +253,10 @@ void CppApplication::exec(void)
            )
        )
     {
-      titer->second->expired(titer->second);
+      // A callback may delete its Timer. Keep the signal implementation alive
+      // until emission finishes so libsigc++ can release disconnected slots.
+      auto expired = titer->second->expired;
+      expired(titer->second);
       if ((titer->second != 0) &&
 	  (titer->second->type() == Timer::TYPE_PERIODIC))
       {
@@ -274,7 +277,8 @@ void CppApplication::exec(void)
       {
 	if (witer->second != 0)
 	{
-	  witer->second->activity(witer->second);
+	  auto activity = witer->second->activity;
+	  activity(witer->second);
 	}
 	else
 	{
@@ -295,7 +299,8 @@ void CppApplication::exec(void)
       {
 	if (witer->second != 0)
 	{
-	  witer->second->activity(witer->second);
+	  auto activity = witer->second->activity;
+	  activity(witer->second);
 	}
 	else
 	{

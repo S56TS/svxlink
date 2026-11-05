@@ -6,12 +6,14 @@
 struct FrnCapture : Async::AudioSink
 {
   std::vector<float> samples;
+  bool flushed = false;
+  unsigned flushes = 0;
   int writeSamples(const float* data, int count) override
   {
     samples.insert(samples.end(), data, data + count);
     return count;
   }
-  void flushSamples() override { sourceAllSamplesFlushed(); }
+  void flushSamples() override { flushed = true; ++flushes; sourceAllSamplesFlushed(); }
 };
 
 struct FrnFixture
@@ -59,6 +61,23 @@ struct FrnFixture
 int main()
 {
   Async::CppApplication app;
+  for (int mode=0;mode<3;++mode)
+  {
+    FrnFixture f; auto& q=*f.qso;
+    FrnCapture capture;
+    assert(q.registerSink(&capture,false));
+    std::vector<float> audio(1600,.2f);
+    assert(q.sinkWriteSamples(audio.data(),audio.size())==static_cast<int>(audio.size()));
+    q.is_receiving_voice=true;
+    q.state=QsoFrn::STATE_RX_AUDIO;
+    if (mode==0) q.disconnect();
+    else if (mode==1) q.onDisconnected(q.tcp_client,Async::TcpConnection::DR_REMOTE_DISCONNECTED);
+    else q.forceReconnect("test active receive recovery");
+    assert(capture.flushed && capture.flushes==1 && !q.is_receiving_voice);
+    q.disconnect();
+    assert(capture.flushes==1);
+    q.unregisterSink();
+  }
   {
     FrnFixture f; auto& q = *f.qso;
     std::vector<std::string> text;

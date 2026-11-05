@@ -191,6 +191,10 @@ class AudioProcessor : public AudioSink, public AudioSource, public sigc::tracka
     AudioProcessor(const AudioProcessor&);
     AudioProcessor& operator=(const AudioProcessor&);
     void writeFromBuf(void);
+    // Bind deferred tasks to this trackable processor, without converting
+    // inherited member pointers across its AudioSink/AudioSource subobjects.
+    void flushOutput(void) { sinkFlushSamples(); }
+    void resumeInput(void) { sourceResumeOutput(); }
 
 };  /* class AudioProcessor */
 

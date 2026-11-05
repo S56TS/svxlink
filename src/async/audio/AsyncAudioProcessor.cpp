@@ -343,7 +343,7 @@ void AudioProcessor::writeFromBuf(void)
       {
         do_flush = false;
         Application::app().runTask(
-            mem_fun(*this, &AudioProcessor::sinkFlushSamples));
+            mem_fun(*this, &AudioProcessor::flushOutput));
       }
     }
   }
@@ -355,7 +355,7 @@ void AudioProcessor::writeFromBuf(void)
   {
     input_stopped = false;
     Application::app().runTask(
-		    mem_fun(*this, &AudioProcessor::sourceResumeOutput));
+		    mem_fun(*this, &AudioProcessor::resumeInput));
   }
 } /* AudioProcessor::writeFromBuf */
 

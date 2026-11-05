@@ -1,5 +1,8 @@
 # AIORS software and virtual validation
 
+The later soak/sanitizer investigation and its additional fixes are documented
+in [AIORS_SOAK_SANITIZERS.md](AIORS_SOAK_SANITIZERS.md).
+
 Validation on `integrate/upstream-aiors`, 2026-11-05. This extends the checks
 in [UPSTREAM_AIORS_INTEGRATION.md](UPSTREAM_AIORS_INTEGRATION.md).
 

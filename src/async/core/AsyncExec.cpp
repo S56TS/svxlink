@@ -531,7 +531,10 @@ void Exec::subprocessExited(void)
   pid = -1;
   delete timeout_timer;
   timeout_timer = 0;
-  exited();
+  // The exit callback is allowed to delete this Exec (for example diagnostics
+  // collectors do so). Retain the signal until its emission has completed.
+  auto exited_signal = exited;
+  exited_signal();
 } /* Exec::subprocessExited */
 
 

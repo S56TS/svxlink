@@ -1,0 +1,243 @@
+{
+  "runs": {
+    "soak-arm64": {
+      "status": "passed",
+      "requested_seconds": 1800.0,
+      "pid": 4491,
+      "mode": "arm64-qemu",
+      "build": "/root/.cache/svxlink-cross/4439812b0f43/arm64",
+      "counters": {
+        "cycles": 134,
+        "frn_midframe_disconnects": 134,
+        "helper_midframe_disconnects": 134,
+        "grant_timeouts": 13,
+        "health_checks": 1638,
+        "max_health_latency_ms": 111.73063900014313,
+        "max_reply_latency_ms": 925.9089980000681,
+        "max_reconnect_latency_ms": 14476.78902299981
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "ebf9a260d85ac5ce4dc5be7c15445101baa0882bd90240d50526c20a2e1704a8",
+        "lib/libasynccore.so": "798488b4adebbf461fdb81218264c5280dd41fb52b0065dbc74da65d9213d92e",
+        "lib/libasynccpp.so": "ad77f2c45b66abeace7ce59210afaae9e6d2a48319aaae1b4946d38c2e6497fd",
+        "lib/libasyncaudio.so": "f2b5ed16cf951c27c3cacb612982f5469ee845c82e4b198d6b84c11fdbded8f3",
+        "lib/RepeaterLogic.so": "061c703440f8a17b2da3f6560379365936f67a2b85a7d47656088c05acbc0f5e",
+        "lib/ModuleFrn.so": "3b1533869155fdfa73a738457d1aa4da0be512493516c43e370e4e87b740279f",
+        "lib/ChatLogic.so": "3f65f175e3c9c4dd1104b76a0c91e56e16a34d5fc66c8872231b8f7d0cd3d48f"
+      },
+      "warmup_seconds": 120,
+      "rss_growth_kib": 528.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 36804,
+      "first_window_median_rss_kib": 36276.0,
+      "last_window_median_rss_kib": 36804.0,
+      "elapsed_seconds": 1801.808607651,
+      "traffic": {
+        "frn_connections": 148,
+        "helper_connections": 135,
+        "frn_frames": 946,
+        "helper_audio_bytes": 5447936,
+        "grant_tx": true
+      },
+      "shutdown_returncode": 0,
+      "sample_count": 1638,
+      "last_rss_kib": 36804.0,
+      "fd_range": [
+        14,
+        15
+      ],
+      "thread_range": [
+        4,
+        4
+      ],
+      "health_p99_ms": 105.37142299972402,
+      "last_10_minute_rss_slope_kib_per_minute": 0.0
+    },
+    "soak-sanitizer": {
+      "status": "passed",
+      "requested_seconds": 1800.0,
+      "pid": 4056,
+      "mode": "native",
+      "build": "/root/.cache/svxlink-sanitize-native",
+      "counters": {
+        "cycles": 134,
+        "frn_midframe_disconnects": 134,
+        "helper_midframe_disconnects": 134,
+        "grant_timeouts": 13,
+        "health_checks": 1638,
+        "max_health_latency_ms": 106.08167800000956,
+        "max_reply_latency_ms": 909.4753350000246,
+        "max_reconnect_latency_ms": 14494.241583000075
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "a9f1938a92e88aa1c7609b5cd90b26d6ac97d770acf23e135e88a637e0401ac5",
+        "lib/libasynccore.so": "e12e1c51c8cebb5afd311709a05211c854831bf84aac615e1b1249c1d53f4651",
+        "lib/libasynccpp.so": "a0faded90dfcfa021e2094f806aa186228a9565c897fbe0cfb530d5dbf0d9985",
+        "lib/libasyncaudio.so": "7efc12c0a73a563493adb3632402013a2674e53dc2d9c9c5e3752d2db9feefdb",
+        "lib/RepeaterLogic.so": "d393e0e73b52a7f9041b2446b6dc0354d8cae39e22fd0d2798fc07e1d2308f74",
+        "lib/ModuleFrn.so": "6cd1aa38a166f1410c6ebaad51d434a2d2bf84d961ada8ad216005b01a54d334",
+        "lib/ChatLogic.so": "daf62ffaa3b056eaf93cb2cc770afc4c951ec11631379b43ce6087382068f8d8"
+      },
+      "warmup_seconds": 120,
+      "rss_growth_kib": 10856.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 128636,
+      "first_window_median_rss_kib": 117536.0,
+      "last_window_median_rss_kib": 128392.0,
+      "elapsed_seconds": 1801.82160229,
+      "traffic": {
+        "frn_connections": 148,
+        "helper_connections": 135,
+        "frn_frames": 946,
+        "helper_audio_bytes": 5449728,
+        "grant_tx": true
+      },
+      "shutdown_returncode": 0,
+      "sample_count": 1638,
+      "last_rss_kib": 128392.0,
+      "fd_range": [
+        14,
+        15
+      ],
+      "thread_range": [
+        3,
+        3
+      ],
+      "health_p99_ms": 105.36377099970196,
+      "last_10_minute_rss_slope_kib_per_minute": 122.69993959881528
+    },
+    "soak-active-rx-arm64": {
+      "status": "passed",
+      "requested_seconds": 1200.0,
+      "pid": 5905,
+      "mode": "arm64-qemu",
+      "build": "/root/.cache/svxlink-cross/4439812b0f43/arm64",
+      "counters": {
+        "cycles": 90,
+        "frn_midframe_disconnects": 90,
+        "helper_midframe_disconnects": 90,
+        "active_rx_disconnects": 90,
+        "max_ptt_release_ms": 1116.0984950001875,
+        "grant_timeouts": 9,
+        "health_checks": 1103,
+        "max_health_latency_ms": 106.69235600016691,
+        "max_reply_latency_ms": 912.9530370000793,
+        "max_reconnect_latency_ms": 14508.108409000215
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "ebf9a260d85ac5ce4dc5be7c15445101baa0882bd90240d50526c20a2e1704a8",
+        "lib/libasynccore.so": "798488b4adebbf461fdb81218264c5280dd41fb52b0065dbc74da65d9213d92e",
+        "lib/libasynccpp.so": "ad77f2c45b66abeace7ce59210afaae9e6d2a48319aaae1b4946d38c2e6497fd",
+        "lib/libasyncaudio.so": "f2b5ed16cf951c27c3cacb612982f5469ee845c82e4b198d6b84c11fdbded8f3",
+        "lib/RepeaterLogic.so": "061c703440f8a17b2da3f6560379365936f67a2b85a7d47656088c05acbc0f5e",
+        "lib/ModuleFrn.so": "1c327dbc9309fe98c70f7f25518a7cd7b61598313f578cbd2caaa66f0b1ce6fd",
+        "lib/ChatLogic.so": "3f65f175e3c9c4dd1104b76a0c91e56e16a34d5fc66c8872231b8f7d0cd3d48f"
+      },
+      "warmup_seconds": 120,
+      "rss_growth_kib": 568.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 36904,
+      "first_window_median_rss_kib": 36336.0,
+      "last_window_median_rss_kib": 36904.0,
+      "elapsed_seconds": 1213.300977385,
+      "traffic": {
+        "frn_connections": 100,
+        "helper_connections": 91,
+        "frn_frames": 638,
+        "helper_audio_bytes": 4262144,
+        "grant_tx": true
+      },
+      "shutdown_returncode": 0,
+      "sample_count": 1103,
+      "last_rss_kib": 36904.0,
+      "fd_range": [
+        14,
+        15
+      ],
+      "thread_range": [
+        4,
+        4
+      ],
+      "health_p99_ms": 105.34245100006956,
+      "last_10_minute_rss_slope_kib_per_minute": 12.467879037050315
+    },
+    "soak-active-rx-sanitizer": {
+      "status": "passed",
+      "requested_seconds": 1200.0,
+      "pid": 5880,
+      "mode": "native",
+      "build": "/root/.cache/svxlink-sanitize-native",
+      "counters": {
+        "cycles": 90,
+        "frn_midframe_disconnects": 90,
+        "helper_midframe_disconnects": 90,
+        "active_rx_disconnects": 90,
+        "max_ptt_release_ms": 1115.670412000327,
+        "grant_timeouts": 9,
+        "health_checks": 1103,
+        "max_health_latency_ms": 106.10081400000126,
+        "max_reply_latency_ms": 898.2517750000625,
+        "max_reconnect_latency_ms": 14490.070238000044
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "a9f1938a92e88aa1c7609b5cd90b26d6ac97d770acf23e135e88a637e0401ac5",
+        "lib/libasynccore.so": "e12e1c51c8cebb5afd311709a05211c854831bf84aac615e1b1249c1d53f4651",
+        "lib/libasynccpp.so": "a0faded90dfcfa021e2094f806aa186228a9565c897fbe0cfb530d5dbf0d9985",
+        "lib/libasyncaudio.so": "7efc12c0a73a563493adb3632402013a2674e53dc2d9c9c5e3752d2db9feefdb",
+        "lib/RepeaterLogic.so": "d393e0e73b52a7f9041b2446b6dc0354d8cae39e22fd0d2798fc07e1d2308f74",
+        "lib/ModuleFrn.so": "a372305188f6eae4f989fd0db2607ba452348a8325f4f17095039f018c71e348",
+        "lib/ChatLogic.so": "daf62ffaa3b056eaf93cb2cc770afc4c951ec11631379b43ce6087382068f8d8"
+      },
+      "warmup_seconds": 120,
+      "rss_growth_kib": 3548.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 129736,
+      "first_window_median_rss_kib": 126048.0,
+      "last_window_median_rss_kib": 129596.0,
+      "elapsed_seconds": 1213.3613303049997,
+      "traffic": {
+        "frn_connections": 100,
+        "helper_connections": 91,
+        "frn_frames": 638,
+        "helper_audio_bytes": 4259328,
+        "grant_tx": true
+      },
+      "shutdown_returncode": 0,
+      "sample_count": 1103,
+      "last_rss_kib": 129596.0,
+      "fd_range": [
+        14,
+        15
+      ],
+      "thread_range": [
+        3,
+        3
+      ],
+      "health_p99_ms": 105.53711100010332,
+      "last_10_minute_rss_slope_kib_per_minute": 101.3646497051357
+    },
+    "soak-reflector": {
+      "status": "passed",
+      "elapsed_seconds": 605.081097215,
+      "server_restarts": 60,
+      "build": "/root/.cache/svxlink-sanitize-native",
+      "resources": {
+        "a": {
+          "rss_growth_kib": 6756,
+          "fd_growth": 0,
+          "peak_rss_kib": 133380
+        },
+        "b": {
+          "rss_growth_kib": 6796,
+          "fd_growth": 0,
+          "peak_rss_kib": 132980
+        }
+      },
+      "client_exit_codes": {
+        "a": 0,
+        "b": 0
+      },
+      "sample_count": 120
+    }
+  }
+}

@@ -1,7 +1,8 @@
-"""Run real RepeaterLogic/LocalTx with a paced, test-only sound card under QEMU.
+"""Run real RepeaterLogic/LocalTx with a paced, test-only sound card.
 
 Checks linked speech, transmitter start delay, generated CTCSS and its logic
-mask, plus real simulated receiver squelch/PTT. No physical devices or API.
+mask, plus real simulated receiver squelch/PTT. Supply --sysroot for ARM64/QEMU
+or omit it for a native build. No physical devices or API.
 """
 import argparse
 import asyncio
@@ -16,6 +17,8 @@ from chat_native import read_frame, send
 
 
 def command(args, binary='svxlink'):
+    if not args.sysroot:
+        return ['env', 'LD_LIBRARY_PATH='+str(args.build/'lib'), str(args.build/'bin'/binary)]
     libs = ':'.join(map(str, [args.build / 'lib', args.sysroot / 'usr/lib/aarch64-linux-gnu']))
     return ['qemu-aarch64-static', '-L', str(args.sysroot), '-E', 'LD_LIBRARY_PATH=' + libs,
             str(args.build / 'bin' / binary)]
@@ -203,9 +206,10 @@ DEFAULT_ACTIVE=1
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True)
-    parser.add_argument('--sysroot', type=Path, required=True)
+    parser.add_argument('--sysroot', type=Path)
     args = parser.parse_args()
-    args.build = args.build.resolve(); args.sysroot = args.sysroot.resolve()
+    args.build = args.build.resolve()
+    if args.sysroot: args.sysroot = args.sysroot.resolve()
     for mask, rf in [('LOGIC', False), ('SQL_OPEN', False), ('SQL_OPEN', True)]:
         await scenario(args, mask, rf)
     await scenario(args, 'LOGIC', chat=True)

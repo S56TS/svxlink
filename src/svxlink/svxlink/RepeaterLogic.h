@@ -173,7 +173,7 @@ class RepeaterLogic : public Logic
     /**
      * @brief 	Destructor
      */
-    virtual ~RepeaterLogic(void) override {};
+    virtual ~RepeaterLogic(void) override;
 
     virtual void allMsgsWritten(void);
     virtual void audioStreamStateChange(bool is_active, bool is_idle);
@@ -211,6 +211,8 @@ class RepeaterLogic : public Logic
     uint32_t        delayed_tg_activation;
     Async::Timer    open_on_ctcss_timer;
     bool            m_dtmf_ignore_when_not_up {true};
+    sigc::connection m_idle_connection;
+    sigc::connection m_tone_connection;
 
     void idleTimeout(Async::Timer *t);
     void setIdle(bool idle);

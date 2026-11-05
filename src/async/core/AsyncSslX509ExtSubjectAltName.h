@@ -39,6 +39,7 @@ An example of how to use the SslX509ExtSubjectAltName class
  ****************************************************************************/
 
 #include <functional>
+#include <cstring>
 
 
 /****************************************************************************
@@ -272,7 +273,7 @@ class SslX509ExtSubjectAltName
               const unsigned char* data =
                 ASN1_STRING_get0_data(entry->d.iPAddress);
               struct in_addr in_addr = {0};
-              in_addr.s_addr = *reinterpret_cast<const unsigned long*>(data);
+              std::memcpy(&in_addr.s_addr, data, sizeof(in_addr.s_addr));
               Async::IpAddress addr(in_addr);
               name = addr.toString();
             }

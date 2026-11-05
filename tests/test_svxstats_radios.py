@@ -13,6 +13,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--sanitizers", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     stats_dir = root / "src/svxlink/svxlink"
@@ -40,7 +41,9 @@ def main():
         unit = Path(temp) / "radios.cpp"
         binary = Path(temp) / "radios"
         unit.write_text(prefix + source + "\n" + allowlist + "\n" + tests)
-        subprocess.run(["g++", "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        extra = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                 "-fno-sanitize-recover=all"] if args.sanitizers else []
+        subprocess.run(["g++", *extra, "-std=c++11", "-Wall", "-Wextra", "-Werror",
                         "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
                         "-pthread", "-I", str(stats_dir), str(unit), "-o", str(binary)], check=True)
         command = [str(binary), str(root / "tests/aiors_diagnostics_v5.txt"), str(Path(temp) / "totals")]

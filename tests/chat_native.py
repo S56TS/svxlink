@@ -49,6 +49,10 @@ async def scenario(args, digits, interrupt=False, malformed=False, change_tg=Fal
 LOGICS=ChatLogic,TestLogic
 LINKS=TestLink
 LOGIC_CORE_PATH={args.build / 'lib'}
+STATS_AIORS_ENABLE=0
+STATS_PERSIST_PATH={root/'stats'}
+STATS_SNAPSHOT_PATH={root/'snapshot'}
+STATS_HISTORY_PATH={root/'history'}
 [ChatLogic]
 TYPE=Chat
 SERVICE_PORT={port}
@@ -136,6 +140,8 @@ DEFAULT_ACTIVE=1
             output, _ = await process.communicate()
             if not success or process.returncode not in (0, -15):
                 print(output.decode(errors="replace"))
+            assert process.returncode in (0, -15), f'SvxLink exited {process.returncode}'
+            assert b'ERROR: LeakSanitizer' not in output
         print(f"PASS native: digits={digits}, interrupt={interrupt}, malformed={malformed}, change_tg={change_tg}")
 
 

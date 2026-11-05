@@ -499,6 +499,7 @@ void QsoFrn::disconnect(void)
   tm_out_queue.clear();
 
   setState(STATE_DISCONNECTED);
+  finishReceiveAudio();
 
   con_timeout_timer->setEnable(false);
 
@@ -796,6 +797,7 @@ void QsoFrn::scheduleReconnect(const std::string& reason)
   }
 
   setState(STATE_DISCONNECTED);
+  finishReceiveAudio();
   con_timeout_timer->setEnable(false);
   rx_timeout_timer->setEnable(false);
   tx_wait_timer->setEnable(false);
@@ -1345,6 +1347,7 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
   send_buffer_cnt = 0;
   pending_tx_frames.clear();
   setState(STATE_DISCONNECTED);
+  finishReceiveAudio();
 
   con_timeout_timer->setEnable(false);
 
@@ -1530,11 +1533,20 @@ void QsoFrn::onTxWaitTimeout(Timer *timer)
 void QsoFrn::onRxTimeout(Timer *timer)
 {
   //cout << __FUNCTION__ << endl;
-  sinkFlushSamples();
-  rx_timeout_timer->setEnable(false);
-  is_receiving_voice = false;
+  finishReceiveAudio();
   //setState(STATE_IDLE);
   sendRequest(RQ_P);
+}
+
+void QsoFrn::finishReceiveAudio()
+{
+  rx_timeout_timer->setEnable(false);
+  if (is_receiving_voice)
+  {
+    // Clear state before downstream callbacks can re-enter disconnect logic.
+    is_receiving_voice = false;
+    sinkFlushSamples();
+  }
 }
 
 

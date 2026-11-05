@@ -157,6 +157,14 @@ RepeaterLogic::RepeaterLogic(void)
   timerclear(&sql_up_timestamp);
 } /* RepeaterLogic::RepeaterLogic */
 
+RepeaterLogic::~RepeaterLogic(void)
+{
+  // Logic's destructor can emit idle changes while disconnecting TX audio.
+  // Derived callbacks must be gone before the repeater's timers/state die.
+  m_idle_connection.disconnect();
+  m_tone_connection.disconnect();
+}
+
 
 bool RepeaterLogic::initialize(Async::Config& cfgobj, const std::string& logic_name)
 {
@@ -292,7 +300,8 @@ bool RepeaterLogic::initialize(Async::Config& cfgobj, const std::string& logic_n
   cfg().getValue(name(), "IDENT_NAG_MIN_TIME", ident_nag_min_time);
   cfg().getValue(name(), "DTMF_IGNORE_WHEN_NOT_UP", m_dtmf_ignore_when_not_up);
 
-  rx().toneDetected.connect(mem_fun(*this, &RepeaterLogic::detectedTone));
+  m_tone_connection = rx().toneDetected.connect(
+      mem_fun(*this, &RepeaterLogic::detectedTone));
   
   if (required_1750_duration > 0)
   {
@@ -314,7 +323,8 @@ bool RepeaterLogic::initialize(Async::Config& cfgobj, const std::string& logic_n
   
   rptValveSetOpen(!no_repeat);
   
-  idleStateChanged.connect(mem_fun(*this, &RepeaterLogic::setIdle));
+  m_idle_connection = idleStateChanged.connect(
+      mem_fun(*this, &RepeaterLogic::setIdle));
   
   setTxCtrlMode(Tx::TX_AUTO);
   

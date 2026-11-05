@@ -1,7 +1,9 @@
-"""Run real ModuleFrn + ChatLogic + simulated RF on loopback under ARM64 QEMU.
+"""Run real ModuleFrn + ChatLogic + simulated RF on loopback.
 
 The local FRN peer grants transmit requests and exchanges real GSM WAV49.
 The voice helper is deterministic; no FRN account, cloud API or radio is used.
+Omit --sysroot for native execution. --soak-seconds keeps one process alive
+across repeated traffic/faults and records resources with --soak-report.
 """
 import argparse
 import asyncio
@@ -49,8 +51,9 @@ int main(int argc, char**) {
   gsm_destroy(state);
 }''')
     binary = root/'codec'
-    subprocess.run(['aarch64-linux-gnu-g++', '--sysroot='+str(args.sysroot),
-                    '-O2', str(source), str(args.sysroot/'usr/lib/aarch64-linux-gnu/libgsm.so'),
+    compiler = ['aarch64-linux-gnu-g++', '--sysroot='+str(args.sysroot)] if args.sysroot else ['g++']
+    gsm_lib = str(args.sysroot/'usr/lib/aarch64-linux-gnu/libgsm.so') if args.sysroot else '-lgsm'
+    subprocess.run([*compiler, '-O2', str(source), gsm_lib,
                     '-o', str(binary)], check=True)
     invocation = command(args)[:-1] + [str(binary)]
     return invocation, subprocess.check_output(invocation)
@@ -70,15 +73,31 @@ def tone_check(samples, rate, frequency, label):
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', type=Path, required=True)
-    parser.add_argument('--sysroot', type=Path, required=True)
+    parser.add_argument('--sysroot', type=Path)
+    parser.add_argument('--soak-seconds', type=float, default=0)
+    parser.add_argument('--soak-active-rx', action='store_true',
+                        help='Drop FRN during active speech and require PTT release before reconnect')
+    parser.add_argument('--soak-report', type=Path)
+    parser.add_argument('--soak-log', type=Path)
+    parser.add_argument('--frn-debug', action='store_true')
     args = parser.parse_args()
-    args.build=args.build.resolve(); args.sysroot=args.sysroot.resolve()
+    args.build=args.build.resolve()
+    if args.sysroot: args.sysroot=args.sysroot.resolve()
     with tempfile.TemporaryDirectory(prefix='frn-radio-chat-') as directory:
         root=Path(directory)
+        args.original_build=args.build
+        if args.soak_seconds:
+            # A rebuild must not replace a shared-library inode mapped by an
+            # ongoing soak. Give this process an immutable runtime snapshot.
+            from soak_support import freeze_build
+            args.build=freeze_build(args.build,root)
         codec_command, packet = codec(args, root)
         assert len(packet)==325
-        frn_connected=asyncio.Future()
+        frn_connected=asyncio.Queue()
         frames, captured, tasks, writers = [], [], [], []
+        helper_writers=[]
+        stats={'frn_connections':0, 'helper_connections':0, 'frn_frames':0,
+               'helper_audio_bytes':0, 'grant_tx':True, 'last_helper_events':[]}
         played=asyncio.Event()
         helper_ready=asyncio.Event()
         reply=(3500*np.sin(2*np.pi*1000*np.arange(8000)/16000)).astype('<i2').tobytes()
@@ -89,25 +108,34 @@ async def main():
                 assert login.startswith(b'CT:'), login
                 writer.write(b'2014003\r\n<AL>OK</AL>\r\n'); await writer.drain()
                 assert await reader.readline()==b'RX0\r\n'
-                frn_connected.set_result(writer)
+                stats['frn_connections']+=1
+                frn_connected.put_nowait(writer)
                 while line := await reader.readline():
                     if line==b'TX0\r\n':
-                        writer.write(b'\x01\x00\x01'); await writer.drain()
-                    elif line==b'TX1\r\n': frames.append(await reader.readexactly(325))
+                        if stats['grant_tx']:
+                            writer.write(b'\x01\x00\x01'); await writer.drain()
+                    elif line==b'TX1\r\n':
+                        frames.append(await reader.readexactly(325))
+                        stats['frn_frames']+=1
                     elif line==b'RX0\r\n':
                         writer.write(b'\x00'); await writer.drain()
                     else: assert line==b'P\r\n', line
             except (asyncio.IncompleteReadError, ConnectionError): pass
         async def helper(reader,writer):
             writers.append(writer)
+            helper_writers.append(writer)
+            stats['helper_connections']+=1
             try:
                 while True:
                     frame=await read_frame(reader)
                     if frame[:1]==b'A':
                         captured.append(frame[1:])
+                        stats['helper_audio_bytes']+=len(frame)-1
                         await send(writer,b'J'+json.dumps({'event':'ack','bytes':len(frame)-1}).encode())
                         continue
                     event=json.loads(frame[1:])
+                    stats['last_helper_events'].append(event)
+                    del stats['last_helper_events'][:-40]
                     if event['event']=='hello':
                         await send(writer,b'J{"event":"ready"}')
                         helper_ready.set()
@@ -131,7 +159,10 @@ proc unknown {args} {}
 variable repeater_is_up; set repeater_is_up 1
 set f [open {%s} w]; close $f
 }
-''' % (root/'up'))
+''' % (root/'up')+'''proc RepeaterLogic::health {token} {
+set f [open {%s} w]; puts $f $token; close $f
+}
+''' % (root/'health'))
         (root/'svxlink.conf').write_text(f'''[GLOBAL]
 LOGICS=TestLogic,RepeaterLogic,ChatLogic
 LINKS=TestLink,ChatLink
@@ -148,7 +179,7 @@ STATS_HISTORY_PATH={root/'history'}
 TYPE=VirtualRadio
 INPUT_FILE={root/'input.pcm'}
 OUTPUT_FILE={root/'linked.f32'}
-START_MS=60000
+START_MS=0
 [RepeaterLogic]
 TYPE=Repeater
 MODULES=ModuleFrn
@@ -190,6 +221,7 @@ TYPE=Chat
 SERVICE_PORT={helper_port}
 TX_DELAY_MS=250
 [ModuleFrn]
+FRN_DEBUG={int(args.frn_debug)}
 NAME=Frn
 ID=7
 MUTE_LOGIC_LINKING=0
@@ -212,14 +244,14 @@ VERSION=2014003
                   stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
         output_task=asyncio.create_task(process.stdout.read())
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(40+args.soak_seconds+90*(args.soak_seconds>0)):
                 await helper_ready.wait()
                 control(root/'squelch','O')
                 while not (root/'up').exists(): await asyncio.sleep(.02)
                 control(root/'command','EVENT activatefrn\n')
                 await asyncio.sleep(.1)
                 control(root/'squelch','Z')
-                peer=await frn_connected
+                peer=await frn_connected.get()
                 await asyncio.sleep(1.5)
                 captured.clear(); frames.clear()
                 radio_offset=(root/'transmitted.pcm').stat().st_size
@@ -253,6 +285,10 @@ VERSION=2014003
                 radio=np.frombuffer((root/'transmitted.pcm').read_bytes()[offset:],dtype='<i2')/32768
                 tone_check(radio,16000,1000,'Chat to RF')
                 print('PASS FRN routing: chat reply reaches RF and FRN while ModuleFrn remains active')
+                if args.soak_seconds:
+                    from soak_support import run_soak
+                    await run_soak(args,root,process,peer,packet,frn_connected,
+                                   helper_ready,helper_writers,played,captured,frames,stats)
                 # Exercise teardown with an active module and RF still keyed.
                 control(root/'squelch','O')
                 await asyncio.sleep(.7)
@@ -265,6 +301,9 @@ VERSION=2014003
             if process.returncode is None: process.terminate()
             await asyncio.wait_for(process.wait(),5)
             output=(await output_task).decode(errors='replace')
+            if args.soak_log:
+                args.soak_log.parent.mkdir(parents=True,exist_ok=True)
+                args.soak_log.write_text(output)
             for server in (frn_server,helper_server): server.close()
             for writer in writers: writer.close()
             results=[]
@@ -274,6 +313,11 @@ VERSION=2014003
             await asyncio.gather(*tasks,return_exceptions=True)
             for server in (frn_server,helper_server): await asyncio.wait_for(server.wait_closed(),3)
         assert not results, results
+        if args.soak_report and args.soak_report.exists():
+            report=json.loads(args.soak_report.read_text())
+            report['shutdown_returncode']=process.returncode
+            if process.returncode!=0: report['status']='failed'
+            args.soak_report.write_text(json.dumps(report,indent=2)+'\n')
         assert '*** ERROR' not in output and process.returncode==0, output
         print('PASS FRN routing: clean shutdown with active FRN and open RF squelch')
 

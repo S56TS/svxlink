@@ -599,6 +599,7 @@ public:
     void tmOutKick();
     void tmOutSendNext(Async::Timer* t);
     bool writeAll(const std::string& out);
+    void finishReceiveAudio();
 
     bool writeFrame(const char* tag, const std::string& frame);
     static std::string headPreview(const std::string& s, size_t n = 40);

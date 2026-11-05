@@ -22,6 +22,7 @@ public:
     config.getValue(name, "OUTPUT_FILE", output);
     config.getValue(name, "SECOND_MS", second_ms);
     config.getValue(name, "START_MS", start_ms);
+    config.getValue(name, "PERIOD_MS", period_ms);
     config.getValue(name, "STOP_ON_PLAY", stop_on_play);
     std::ifstream file(input, std::ios::binary);
     int16_t value;
@@ -44,14 +45,15 @@ private:
   Async::Timer timer;
   std::vector<float> samples;
   std::ofstream recording;
-  unsigned elapsed = 0, second_ms = 0, start_ms = 500;
+  unsigned elapsed = 0, second_ms = 0, start_ms = 500, period_ms = 0;
   size_t position = 0;
   bool sending = false;
   bool stop_on_play = false;
   void tick()
   {
     elapsed += 20;
-    if (elapsed == start_ms || (second_ms && elapsed == second_ms))
+    if (elapsed == start_ms || (second_ms && elapsed == second_ms) ||
+        (period_ms && elapsed > start_ms && (elapsed-start_ms)%period_ms == 0))
     {
       std::cout << "TEST fixture " << name() << " start " << elapsed << std::endl;
       sending = true; position = 0; setIdle(false);

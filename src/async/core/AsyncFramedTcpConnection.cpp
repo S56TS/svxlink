@@ -328,6 +328,11 @@ void FramedTcpConnection::onSendBufferFull(bool is_full)
 
 void FramedTcpConnection::disconnectCleanup(void)
 {
+  // A new transport starts at a frame boundary. A body interrupted on the
+  // old connection must never consume bytes from the reconnect handshake.
+  m_size_received = false;
+  m_frame_size = 0;
+  m_frame.clear();
   for (TxQueue::iterator it = m_txq.begin(); it != m_txq.end(); ++it)
   {
     delete *it;
