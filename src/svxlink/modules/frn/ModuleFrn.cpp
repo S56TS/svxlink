@@ -556,9 +556,7 @@ void ModuleFrn::onQsoStateChange(QsoFrn::State st)
   last_qso_state = st;
 
   // FRN TX is active in any of the TX audio states.
-  const bool is_tx = (st == QsoFrn::STATE_TX_AUDIO ||
-                      st == QsoFrn::STATE_TX_AUDIO_APPROVED ||
-                      st == QsoFrn::STATE_TX_AUDIO_WAITING);
+  const bool is_tx = qso->isTransmitting();
   const bool is_rx = (st == QsoFrn::STATE_RX_AUDIO);
 
   SvxStats::instance().onFrnTxState(is_tx);

@@ -38,6 +38,12 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <cerrno>
+#include <cctype>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sigc++/bind.h>
 #include <sstream>
 #include <regex.h>
@@ -192,22 +198,19 @@ namespace {
   const long MAX_LIST_ITEM_COUNT = 10000;
 
   // Parse the item count line at the start of an FRN list into a
-  // validated, non-negative count. A line that fails to parse as a
-  // non-negative integer yields a count of 0. Excessive counts are capped
-  // at MAX_LIST_ITEM_COUNT so the list cannot grow without bound.
-  int parseListItemCount(const std::string &line)
+  // validated count. Reject malformed/oversized lists rather than treating
+  // their remaining entries as protocol commands after a truncated count.
+  bool parseListItemCount(const std::string &line, int& count)
   {
     char *endp = 0;
-    long count = strtol(line.c_str(), &endp, 10);
-    if (endp == line.c_str() || count < 0)
-    {
-      return 0;
-    }
-    if (count > MAX_LIST_ITEM_COUNT)
-    {
-      return MAX_LIST_ITEM_COUNT;
-    }
-    return static_cast<int>(count);
+    errno = 0;
+    const long value = strtol(line.c_str(), &endp, 10);
+    const bool converted = endp != line.c_str();
+    while (*endp && std::isspace(static_cast<unsigned char>(*endp))) ++endp;
+    if (errno == ERANGE || !converted || *endp ||
+        value < 0 || value > MAX_LIST_ITEM_COUNT) return false;
+    count = static_cast<int>(value);
+    return true;
   }
 
   // Read one line from a buffer and return the number of bytes it
@@ -234,6 +237,58 @@ namespace {
 
 } // namespace
 
+// Socket policy is local to FRN; other Async users retain their own behavior.
+class QsoFrn::FrnTcpClient : public Async::TcpClient<>
+{
+  public:
+    explicit FrnTcpClient(size_t size) : Async::TcpClient<>(size) {}
+
+    bool outstandingBytes(size_t& bytes) const
+    {
+      bytes = pendingWriteBytes();
+#ifdef __linux__
+      int queued = 0;
+      if (ioctl(socket(), TIOCOUTQ, &queued) < 0) return false;
+      // Linux TCP includes unsent and unacknowledged payload here. Thus
+      // draining the Async queue into a dead peer's kernel queue is not
+      // mistaken for end-to-end progress.
+      bytes += static_cast<size_t>(std::max(0, queued));
+#endif
+      return true;
+    }
+
+    void configure()
+    {
+      const int buffer_bytes = 16384;
+      if (setsockopt(socket(), SOL_SOCKET, SO_SNDBUF,
+                     &buffer_bytes, sizeof(buffer_bytes)) < 0)
+        cerr << "FRN: could not limit TCP send buffer: " << strerror(errno) << endl;
+#ifdef TCP_USER_TIMEOUT
+      const unsigned int timeout_ms = 30000;
+      if (setsockopt(socket(), IPPROTO_TCP, TCP_USER_TIMEOUT,
+                     &timeout_ms, sizeof(timeout_ms)) < 0)
+        cerr << "FRN: TCP_USER_TIMEOUT unavailable: " << strerror(errno) << endl;
+#endif
+    }
+
+    void discardPendingOutput()
+    {
+      if (!isConnected()) return;
+      // Do not drain stale voice to the old server while replacing a
+      // failed stream, particularly when the replacement uses a backup.
+      const struct linger abortive = {1, 0};
+      if (setsockopt(socket(), SOL_SOCKET, SO_LINGER,
+                     &abortive, sizeof(abortive)) < 0)
+        cerr << "FRN: could not abort pending TCP output: " << strerror(errno) << endl;
+    }
+
+  protected:
+    using Async::TcpClient<>::operator=;
+};
+
+// std::chrono duration construction binds this constant by reference in C++11.
+const int QsoFrn::CON_TIMEOUT_TIME;
+
 
 /****************************************************************************
  *
@@ -243,11 +298,12 @@ namespace {
 
 QsoFrn::QsoFrn(ModuleFrn *module)
   : init_ok(false)
-  , tcp_client(new TcpClient<>(TCP_BUFFER_SIZE))
+  , tcp_client(new FrnTcpClient(TCP_BUFFER_SIZE))
   , rx_timeout_timer(new Timer(RX_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , con_timeout_timer(new Timer(CON_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
   , tx_wait_timer(new Timer(TX_GRANT_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
   , keepalive_timer(new Timer(KEEPALIVE_TIMEOUT_TIME, Timer::TYPE_PERIODIC))
+  , transport_timer(new Timer(1000, Timer::TYPE_PERIODIC))
   , reconnect_timer(new Timer(RECONNECT_TIMEOUT_TIME, Timer::TYPE_ONESHOT))
   , state(STATE_DISCONNECTED)
   , connect_retry_cnt(0)
@@ -405,6 +461,9 @@ QsoFrn::QsoFrn(ModuleFrn *module)
   keepalive_timer->expired.connect(
       mem_fun(*this, &QsoFrn::onKeepaliveTimeout));
 
+  transport_timer->setEnable(false);
+  transport_timer->expired.connect(mem_fun(*this, &QsoFrn::onTransportTimeout));
+
   reconnect_timer->setEnable(false);
   reconnect_timer->expired.connect(
       mem_fun(*this, &QsoFrn::onDelayedReconnect));
@@ -428,6 +487,9 @@ QsoFrn::~QsoFrn(void)
 
   delete tx_wait_timer;
   tx_wait_timer = 0;
+
+  delete transport_timer;
+  transport_timer = 0;
 
   delete rx_timeout_timer;
   rx_timeout_timer = 0;
@@ -465,12 +527,9 @@ bool QsoFrn::initOk(void)
 
 void QsoFrn::connect(bool is_backup)
 {
-  reconnect_timer->setEnable(false);
-
-  if (!tcp_client->isIdle())
-  {
-    tcp_client->disconnect();
-  }
+  disconnect();
+  send_progress_at = Clock::now();
+  submitted_bytes = acknowledged_bytes = 0;
 
   setState(STATE_CONNECTING);
   con_timeout_timer->setEnable(true);
@@ -487,6 +546,19 @@ void QsoFrn::connect(bool is_backup)
 void QsoFrn::disconnect(void)
 {
   reconnect_timer->setEnable(false);
+  clearSession();
+
+  setState(STATE_DISCONNECTED);
+  finishReceiveAudio();
+  con_timeout_timer->setEnable(false);
+
+  if (tcp_client != 0) tcp_client->disconnect();
+}
+
+
+void QsoFrn::clearSession()
+{
+  transport_timer->setEnable(false);
   rx_timeout_timer->setEnable(false);
   tx_wait_timer->setEnable(false);
   tx_end_pending = false;
@@ -497,15 +569,14 @@ void QsoFrn::disconnect(void)
     tm_out_timer->setEnable(false);
   }
   tm_out_queue.clear();
-
-  setState(STATE_DISCONNECTED);
-  finishReceiveAudio();
-
-  con_timeout_timer->setEnable(false);
-
-  if (tcp_client != 0)
+  cur_item_list.clear();
+  lines_to_read = -1;
+  list_bytes = 0;
+  list_return_state = STATE_IDLE;
+  if (!client_list.empty())
   {
-    tcp_client->disconnect();
+    client_list.clear();
+    frnClientListReceived(client_list);
   }
 }
 
@@ -523,7 +594,7 @@ std::string QsoFrn::stateToString(State state)
     case STATE_LOGGING_IN_1:
       return "LOGGING_IN_1";
     case STATE_LOGGING_IN_2:
-      return "LOGGIN_IN_2";
+      return "LOGGING_IN_2";
     case STATE_IDLE:
       return "IDLE";
     case STATE_ERROR:
@@ -555,7 +626,9 @@ int QsoFrn::writeSamples(const float *samples, int count)
   if (tx_end_pending)
     return count;
 
-  if (state == STATE_IDLE)
+  State st = audioState();
+  if (st == STATE_IDLE && state != STATE_IDLE) return count;
+  if (st == STATE_IDLE)
   {
     if (!initGsmWav49(gsmh_tx, "TX"))
     {
@@ -567,12 +640,20 @@ int QsoFrn::writeSamples(const float *samples, int count)
     {
       if (opt_frn_debug)
         cerr << "FRN TX: failed to issue TX0 request" << endl;
-      return 0;
+      return count;
     }
     setState(STATE_TX_AUDIO_WAITING);
+    // Give the new exchange its own full deadline even if the last idle
+    // reply is already old. The independent grant timer still limits this
+    // wait to ten seconds, including a fragmented grant/client index.
+    con_timeout_timer->reset();
     tx_wait_timer->setEnable(true);
     tx_wait_timer->reset();
   }
+  st = audioState();
+  // Never accumulate radio/chat audio during login, remote RX or reconnect.
+  if (st != STATE_TX_AUDIO && st != STATE_TX_AUDIO_WAITING &&
+      st != STATE_TX_AUDIO_APPROVED) return count;
 
   int samples_read = 0;
 
@@ -591,10 +672,11 @@ int QsoFrn::writeSamples(const float *samples, int count)
     }
     if (send_buffer_cnt == BUFFER_SIZE)
     {
-      if (state == STATE_TX_AUDIO)
+      if (audioState() == STATE_TX_AUDIO)
       {
         sendVoiceData(send_buffer, send_buffer_cnt);
         send_buffer_cnt = 0;
+        if (!isConnected()) return count;
       }
       else
       {
@@ -616,7 +698,7 @@ void QsoFrn::flushSamples(void)
 {
   //cout << __FUNCTION__ << " " << stateToString(state) << endl;
 
-  if (state == STATE_TX_AUDIO)
+  if (audioState() == STATE_TX_AUDIO)
   {
     if (send_buffer_cnt > 0)
     {
@@ -627,9 +709,9 @@ void QsoFrn::flushSamples(void)
       sendVoiceData(send_buffer, send_buffer_cnt);
       send_buffer_cnt = 0;
     }
-    sendRequest(RQ_RX0);
+    if (isConnected()) sendRequest(RQ_RX0);
   }
-  else if (state == STATE_TX_AUDIO_WAITING || state == STATE_TX_AUDIO_APPROVED)
+  else if (audioState() == STATE_TX_AUDIO_WAITING || audioState() == STATE_TX_AUDIO_APPROVED)
   {
     // Retain the buffered audio until the grant's client index is complete.
     tx_end_pending = true;
@@ -683,6 +765,14 @@ void QsoFrn::setState(State newState)
     if (state == STATE_IDLE)
       tmOutKick();
   }
+}
+
+
+QsoFrn::State QsoFrn::audioState() const
+{
+  if (state == STATE_RX_LIST || state == STATE_RX_CLIENT_LIST ||
+      state == STATE_RX_CLIENT_LIST_HEADER) return list_return_state;
+  return state;
 }
 
 
@@ -763,6 +853,9 @@ void QsoFrn::sendVoiceData(short *data, int len)
     return;
   }
 
+  // Like upstream, an active transmitter need not receive FRN replies.
+  // checkSendProgress independently requires the outgoing transport to move.
+  con_timeout_timer->reset();
   frnTxBytes((uint64_t)nbytes);
 }
 
@@ -784,6 +877,7 @@ void QsoFrn::reconnect(void)
 
 void QsoFrn::forceReconnect(const std::string& reason)
 {
+  tcp_client->discardPendingOutput();
   disconnect();
   scheduleReconnect(reason);
 }
@@ -796,19 +890,10 @@ void QsoFrn::scheduleReconnect(const std::string& reason)
     cout << reason << endl;
   }
 
+  clearSession();
   setState(STATE_DISCONNECTED);
   finishReceiveAudio();
   con_timeout_timer->setEnable(false);
-  rx_timeout_timer->setEnable(false);
-  tx_wait_timer->setEnable(false);
-  tx_end_pending = false;
-  send_buffer_cnt = 0;
-  pending_tx_frames.clear();
-  if (tm_out_timer != 0)
-  {
-    tm_out_timer->setEnable(false);
-  }
-  tm_out_queue.clear();
 
   cout << "reconnecting in " << reconnect_timeout_ms << " ms" << endl;
   reconnect_timer->setTimeout(reconnect_timeout_ms);
@@ -848,6 +933,13 @@ bool QsoFrn::writeAll(const std::string& out)
 {
   if (!tcp_client->isConnected())
     return false;
+  if (!checkSendProgress()) return false;
+  if (out.size() > MAX_PENDING_WRITE_BYTES ||
+      tcp_client->pendingWriteBytes() > MAX_PENDING_WRITE_BYTES - out.size())
+  {
+    forceReconnect("FRN outgoing buffer limit exceeded");
+    return false;
+  }
 
   size_t off = 0;
   const size_t len = out.size();
@@ -855,8 +947,38 @@ bool QsoFrn::writeAll(const std::string& out)
   {
     int n = tcp_client->write(out.c_str() + off, len - off);
     if (n <= 0)
+    {
+      forceReconnect("FRN TCP write failed");
       return false;
+    }
     off += static_cast<size_t>(n);
+    submitted_bytes += static_cast<size_t>(n);
+  }
+  return true;
+}
+
+
+bool QsoFrn::checkSendProgress()
+{
+  if (!tcp_client->isConnected()) return false;
+  size_t outstanding = 0;
+  if (!tcp_client->outstandingBytes(outstanding))
+  {
+    forceReconnect("FRN cannot inspect TCP send queue");
+    return false;
+  }
+  const uint64_t delivered = submitted_bytes > outstanding
+      ? submitted_bytes - outstanding : 0;
+  const auto now = Clock::now();
+  if (outstanding == 0 || delivered > acknowledged_bytes)
+  {
+    acknowledged_bytes = std::max(acknowledged_bytes, delivered);
+    send_progress_at = now;
+  }
+  else if (now - send_progress_at >= std::chrono::milliseconds(CON_TIMEOUT_TIME))
+  {
+    forceReconnect("FRN outgoing TCP stalled -> reconnect");
+    return false;
   }
   return true;
 }
@@ -941,6 +1063,16 @@ bool QsoFrn::sendTextMessage(const std::string& to_id, const std::string& msg)
 
   s << "TM:<ID>" << xmlEscape(to_id) << "</ID><MS>" << xmlEscape(msg)
     << "</MS>\r\n";
+
+  size_t queued = 0;
+  for (const auto& pending : tm_out_queue) queued += pending.frame.size();
+  if (tm_out_queue.size() >= MAX_TEXT_QUEUE_ITEMS ||
+      s.str().size() > MAX_PENDING_WRITE_BYTES ||
+      queued + s.str().size() > MAX_TEXT_QUEUE_BYTES)
+  {
+    cerr << "FRN text queue limit exceeded; message rejected" << endl;
+    return false;
+  }
 
   PendingTm item;
   item.frame = s.str();
@@ -1156,6 +1288,9 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
     case DT_BLOCK_LIST:
     case DT_MUTE_LIST:
     case DT_ACCESS_MODE:
+      list_return_state = state;
+      list_started_at = Clock::now();
+      list_bytes = 0;
       last_list_response = cmd;
       lines_to_read = -1;
       cur_item_list.clear();
@@ -1163,11 +1298,15 @@ int QsoFrn::handleCommand(unsigned char *data, int len)
       break;
 
     case DT_CLIENT_LIST:
+      list_return_state = state;
+      list_started_at = Clock::now();
+      list_bytes = 0;
+      cur_item_list.clear();
       setState(STATE_RX_CLIENT_LIST_HEADER);
       break;
 
     default:
-      cout << "unknown command " << cmd << endl;
+      forceReconnect("FRN unknown protocol command");
       break;
   }
   return bytes_read;
@@ -1191,6 +1330,7 @@ int QsoFrn::handleListHeader(unsigned char *data, int len)
 
 int QsoFrn::handleList(unsigned char *data, int len)
 {
+  if (!checkProtocolLine(data, len)) return len;
   if (opt_frn_debug) {
     std::string raw((char*)data, len);
     std::string head = headPreview(raw, 120);
@@ -1209,10 +1349,20 @@ int QsoFrn::handleList(unsigned char *data, int len)
     {
       if (lines_to_read == -1)
       {
-        lines_to_read = parseListItemCount(line);
+        if (!parseListItemCount(line, lines_to_read))
+        {
+          forceReconnect("FRN invalid list item count");
+          return len;
+        }
       }
       else
       {
+        list_bytes += line.size();
+        if (list_bytes > MAX_LIST_BYTES)
+        {
+          forceReconnect("FRN list size limit exceeded");
+          return len;
+        }
         cur_item_list.push_back(line);
         lines_to_read--;
       }
@@ -1268,7 +1418,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
     }
     cur_item_list.clear();
     lines_to_read = -1;
-    setState(STATE_IDLE);
+    setState(list_return_state);
   }
   //cout << "got " << len << " read " << bytes_read << endl;
   return bytes_read;
@@ -1277,6 +1427,7 @@ int QsoFrn::handleList(unsigned char *data, int len)
 
 int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
 {
+  if (!checkProtocolLine(data, len)) return len;
   int bytes_read = 0;
   std::string line;
   std::istringstream lines(std::string((char*)data, len));
@@ -1287,8 +1438,9 @@ int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
     if (line_bytes <= 0) return 0;
     if (stage_one)
     {
-      if (line.length() == std::string("2014003").length() ||
-          line.length() == std::string("0").length())
+      if (!line.empty() && line.size() <= 10 &&
+          std::all_of(line.begin(), line.end(), [](unsigned char ch)
+                      { return std::isdigit(ch); }))
       {
         setState(STATE_LOGGING_IN_2);
         cout << "login stage 1 completed: " << line << endl;
@@ -1301,12 +1453,16 @@ int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
     }
     else
     {
-      if (line.find("<AL>BLOCK</AL>") == std::string::npos &&
-          line.find("<AL>WRONG</AL>") == std::string::npos)
+      std::string access;
+      const bool accepted = extractTagValue(line, "AL", access) &&
+          (access == "OK" || access == "ADMIN" ||
+           access == "OWNER" || access == "NETOWNER");
+      if (accepted)
       {
-        setState(STATE_IDLE);
         if (sendRequest(RQ_RX0))
         {
+          setState(STATE_IDLE);
+          con_timeout_timer->reset();
           connect_retry_cnt = 0;
           reconnect_timeout_ms = RECONNECT_TIMEOUT_TIME;
           cout << "login stage 2 completed: " << line << endl;
@@ -1314,7 +1470,7 @@ int QsoFrn::handleLogin(unsigned char *data, int len, bool stage_one)
       }
       else
       {
-        cerr << "login stage 2 failed: " << line << endl;
+        cerr << "FRN login rejected: " << (access.empty() ? "missing access level" : access.substr(0, 64)) << endl;
         forceReconnect("FRN login stage 2 failed");
       }
     }
@@ -1328,6 +1484,11 @@ void QsoFrn::onConnected(void)
 {
   //cout << __FUNCTION__ << endl;
   setState(STATE_CONNECTED);
+  tcp_client->configure();
+  transport_timer->setEnable(true);
+  transport_timer->reset();
+  submitted_bytes = acknowledged_bytes = 0;
+  send_progress_at = Clock::now();
 
   con_timeout_timer->setEnable(true);
   con_timeout_timer->reset();
@@ -1342,10 +1503,7 @@ void QsoFrn::onDisconnected(TcpConnection *conn,
   bool needs_reconnect = false;
   std::string reconnect_reason;
 
-  tx_wait_timer->setEnable(false);
-  tx_end_pending = false;
-  send_buffer_cnt = 0;
-  pending_tx_frames.clear();
+  clearSession();
   setState(STATE_DISCONNECTED);
   finishReceiveAudio();
 
@@ -1422,12 +1580,12 @@ int QsoFrn::onDataReceived(TcpConnection *con, void *data, int len)
   //cout << __FUNCTION__ << " len: " << len << endl;
   unsigned char *p_data = (unsigned char*)data;
 
-  con_timeout_timer->reset();
   int remaining_bytes = len;
 
   while (remaining_bytes > 0)
   {
     int bytes_read = 0;
+    const bool logged_in = isConnected();
 
     switch (state)
     {
@@ -1491,12 +1649,28 @@ int QsoFrn::onDataReceived(TcpConnection *con, void *data, int len)
         break;
     }
     //cout << bytes_read << " " << remaining_bytes << " " << len << endl;
+    // A handler can close and clear the actual Async receive buffer.
+    // Do not inspect any more data from that old connection afterwards.
+    if (!tcp_client->isConnected() || state == STATE_DISCONNECTED) return len;
     if (bytes_read == 0)
       break;
+    if (logged_in) con_timeout_timer->reset();
     remaining_bytes -= bytes_read;
     p_data += bytes_read;
   }
   return len - remaining_bytes;
+}
+
+
+bool QsoFrn::checkProtocolLine(const unsigned char* data, int len)
+{
+  const auto end = std::find(data, data + len, '\n');
+  if (static_cast<size_t>(end - data) > MAX_PROTOCOL_LINE_BYTES)
+  {
+    forceReconnect("FRN protocol line size limit exceeded");
+    return false;
+  }
+  return true;
 }
 
 
@@ -1508,17 +1682,14 @@ void QsoFrn::onSendBufferFull(bool is_full)
 
 void QsoFrn::onConnectTimeout(Timer *timer)
 {
-  // If we are "connected" but no data has been received for too long we may
-  // be stuck after a link flap (e.g. Ethernet unplug/replug). Force a reconnect
-  // in *any* state except DISCONNECTED.
+  // Outgoing voice refreshes this watchdog like upstream, but has an
+  // independent transport-progress check and a bounded outgoing queue.
   if (state != STATE_DISCONNECTED)
   {
     std::stringstream ss;
     ss << "FRN connection watchdog timeout in state "
        << stateToString(state);
-    cout << ss.str() << " -> reconnect" << endl;
-    disconnect();
-    reconnect();
+    forceReconnect(ss.str() + " -> reconnect");
   }
 }
 
@@ -1526,7 +1697,7 @@ void QsoFrn::onConnectTimeout(Timer *timer)
 void QsoFrn::onTxWaitTimeout(Timer *timer)
 {
   tx_wait_timer->setEnable(false);
-  if (state == STATE_TX_AUDIO_WAITING || state == STATE_TX_AUDIO_APPROVED)
+  if (audioState() == STATE_TX_AUDIO_WAITING || audioState() == STATE_TX_AUDIO_APPROVED)
     forceReconnect("FRN transmit grant timed out");
 }
 
@@ -1535,7 +1706,7 @@ void QsoFrn::onRxTimeout(Timer *timer)
   //cout << __FUNCTION__ << endl;
   finishReceiveAudio();
   //setState(STATE_IDLE);
-  sendRequest(RQ_P);
+  if (state == STATE_IDLE) sendRequest(RQ_P);
 }
 
 void QsoFrn::finishReceiveAudio()
@@ -1552,8 +1723,21 @@ void QsoFrn::finishReceiveAudio()
 
 void QsoFrn::onKeepaliveTimeout(Timer *timer)
 {
-  if (state == STATE_IDLE)
-    sendRequest(RQ_P);
+  if (state == STATE_IDLE) sendRequest(RQ_P);
+}
+
+
+void QsoFrn::onTransportTimeout(Timer *timer)
+{
+  if (!tcp_client->isConnected()) return;
+  if (!checkSendProgress()) return;
+  if ((state == STATE_RX_LIST || state == STATE_RX_CLIENT_LIST ||
+       state == STATE_RX_CLIENT_LIST_HEADER) &&
+      Clock::now() - list_started_at >= std::chrono::milliseconds(CON_TIMEOUT_TIME))
+  {
+    forceReconnect("FRN list exchange timed out");
+    return;
+  }
 }
 
 

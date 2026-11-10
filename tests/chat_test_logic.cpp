@@ -10,6 +10,9 @@
 #include <AsyncTimer.h>
 #include "LogicBase.h"
 
+// Optional test-only allocation census; never linked into a production logic.
+extern "C" size_t __sanitizer_get_current_allocated_bytes() __attribute__((weak));
+
 class ChatTestLogic : public LogicBase, private Async::AudioSource,
                       private Async::AudioSink
 {
@@ -24,6 +27,8 @@ public:
     config.getValue(name, "START_MS", start_ms);
     config.getValue(name, "PERIOD_MS", period_ms);
     config.getValue(name, "STOP_ON_PLAY", stop_on_play);
+    std::string heap_path;
+    if (config.getValue(name, "HEAP_REPORT_FILE", heap_path)) heap_recording.open(heap_path);
     std::ifstream file(input, std::ios::binary);
     int16_t value;
     while (file.read(reinterpret_cast<char*>(&value), sizeof(value)))
@@ -45,6 +50,7 @@ private:
   Async::Timer timer;
   std::vector<float> samples;
   std::ofstream recording;
+  std::ofstream heap_recording;
   unsigned elapsed = 0, second_ms = 0, start_ms = 500, period_ms = 0;
   size_t position = 0;
   bool sending = false;
@@ -52,6 +58,11 @@ private:
   void tick()
   {
     elapsed += 20;
+    if (elapsed % 1000 == 0 && heap_recording.is_open() && __sanitizer_get_current_allocated_bytes)
+    {
+      heap_recording << elapsed << " " << __sanitizer_get_current_allocated_bytes() << "\n";
+      heap_recording.flush();
+    }
     if (elapsed == start_ms || (second_ms && elapsed == second_ms) ||
         (period_ms && elapsed > start_ms && (elapsed-start_ms)%period_ms == 0))
     {

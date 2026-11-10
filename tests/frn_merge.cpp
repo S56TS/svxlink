@@ -93,19 +93,137 @@ int main()
     payload += "1\n<ID>456</ID><MS>RunCmd: help</MS>\r\n";
     assert(f.feed(payload) == static_cast<int>(payload.size()));
     assert((text == std::vector<std::string>{"456", "RunCmd: help", "P"}));
-    for (const auto& count : {std::string("-1\n"), std::string("bad\r\n")})
-    {
-      payload.assign(1, QsoFrn::DT_NET_NAMES); payload += count;
-      assert(f.feed(payload) == static_cast<int>(payload.size()));
-      assert(q.state == QsoFrn::STATE_IDLE && q.lines_to_read == -1);
-    }
-    payload.assign(1, QsoFrn::DT_NET_NAMES); payload += "999999999999999999999999\n";
+    payload.assign(1, QsoFrn::DT_NET_NAMES); payload += "0\n";
     assert(f.feed(payload) == static_cast<int>(payload.size()));
-    assert(q.lines_to_read == 10000 && q.cur_item_list.empty());
+    assert(q.state == QsoFrn::STATE_IDLE && q.cur_item_list.empty());
     q.state = QsoFrn::STATE_IDLE;
     q.cur_item_list.push_back("stale"); q.lines_to_read = 77;
     assert(f.feed(std::string(1, QsoFrn::DT_TEXT_MESSAGE)) == 1);
     assert(q.lines_to_read == -1 && q.cur_item_list.empty());
+  }
+  for (const std::string count : {"-1\n", "bad\n", "999999999999999999999999\n",
+                                  "10001\n", "2junk\n", " \n"})
+  {
+    FrnFixture f; auto& q = *f.qso;
+    const std::string payload = std::string(1, QsoFrn::DT_NET_NAMES) + count;
+    assert(f.feed(payload) == static_cast<int>(payload.size()));
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.reconnect_timer->isEnabled());
+    assert(q.cur_item_list.empty());
+  }
+  for (const std::string access : {"OK", "ADMIN", "OWNER", "NETOWNER", "DUPL",
+                                   "BLOCK", "WRONG", "UNKNOWN", ""})
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = QsoFrn::STATE_LOGGING_IN_2;
+    q.connect_retry_cnt = 7;
+    q.reconnect_timeout_ms = 15000;
+    const std::string reply = access.empty() ? "garbage\n" : "<AL>" + access + "</AL>\n";
+    assert(f.feed(reply) == static_cast<int>(reply.size()));
+    const bool accepted = access == "OK" || access == "ADMIN" ||
+                          access == "OWNER" || access == "NETOWNER";
+    if (accepted)
+      assert(q.state == QsoFrn::STATE_IDLE && q.connect_retry_cnt == 0 &&
+             q.reconnect_timeout_ms == q.RECONNECT_TIMEOUT_TIME && f.wire() == "RX0\r\n");
+    else
+      assert(q.state == QsoFrn::STATE_DISCONNECTED && q.connect_retry_cnt == 7 &&
+             q.reconnect_timeout_ms == 15000 && q.reconnect_timer->isEnabled());
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = QsoFrn::STATE_TX_AUDIO;
+    const std::string list = std::string(1, QsoFrn::DT_NET_NAMES) + "1\n";
+    assert(f.feed(list) == static_cast<int>(list.size()));
+    assert(q.state == QsoFrn::STATE_RX_LIST && q.isTransmitting());
+    std::vector<float> audio(q.BUFFER_SIZE, 0.1f);
+    assert(q.writeSamples(audio.data(), audio.size()) == static_cast<int>(audio.size()));
+    assert(q.tx_voice_packets == 1 && f.wire().substr(0, 5) == "TX1\r\n");
+    assert(f.feed("room\n") == 5);
+    assert(q.state == QsoFrn::STATE_TX_AUDIO && q.isTransmitting());
+    // A metadata exchange cannot bypass the independent grant timeout.
+    q.state = QsoFrn::STATE_TX_AUDIO_WAITING;
+    f.feed(list);
+    q.onTxWaitTimeout(q.tx_wait_timer);
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.reconnect_timer->isEnabled());
+  }
+  for (auto state : {QsoFrn::STATE_DISCONNECTED, QsoFrn::STATE_CONNECTING,
+                    QsoFrn::STATE_LOGGING_IN_1, QsoFrn::STATE_RX_AUDIO})
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = state;
+    std::vector<float> audio(q.BUFFER_SIZE * 2, 0.1f);
+    assert(q.writeSamples(audio.data(), audio.size()) == static_cast<int>(audio.size()));
+    assert(q.pending_tx_frames.empty() && q.send_buffer_cnt == 0 && f.wire().empty());
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.tcp_client->freeze();
+    assert(q.writeAll(std::string(q.MAX_PENDING_WRITE_BYTES, 'x')));
+    assert(q.tcp_client->pendingWriteBytes() == q.MAX_PENDING_WRITE_BYTES);
+    assert(!q.writeAll("x"));
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.tcp_client->pendingWriteBytes() == 0);
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.tcp_client->freeze();
+    assert(q.writeAll("outbound"));
+    q.send_progress_at -= std::chrono::seconds(31);
+    // Even fresh incoming data must not hide an outgoing transport stall.
+    f.feed(std::string(1, QsoFrn::DT_NET_NAMES) + "0\n");
+    q.onTransportTimeout(q.transport_timer);
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.reconnect_timer->isEnabled());
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = QsoFrn::STATE_RX_LIST;
+    for (size_t n = 0; n < q.MAX_TEXT_QUEUE_ITEMS; ++n)
+      assert(q.sendTextMessage("123", "small"));
+    assert(!q.sendTextMessage("123", "overflow"));
+    assert(q.tm_out_queue.size() == q.MAX_TEXT_QUEUE_ITEMS);
+    q.disconnect();
+    assert(q.tm_out_queue.empty());
+  }
+  for (bool login : {false, true})
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = login ? QsoFrn::STATE_LOGGING_IN_1 : QsoFrn::STATE_RX_LIST;
+    const std::string oversized(q.MAX_PROTOCOL_LINE_BYTES + 1, 'x');
+    assert(f.feed(oversized) == static_cast<int>(oversized.size()));
+    assert(q.state == QsoFrn::STATE_DISCONNECTED);
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    f.feed(std::string(1, QsoFrn::DT_NET_NAMES) + "100\n");
+    const std::string line(60000, 'x');
+    for (int n = 0; n < 18 && q.isConnected(); ++n) f.feed(line + "\n");
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.cur_item_list.empty());
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    f.feed(std::string(1, QsoFrn::DT_NET_NAMES) + "1\n");
+    q.list_started_at -= std::chrono::seconds(31);
+    q.onTransportTimeout(q.transport_timer);
+    assert(q.state == QsoFrn::STATE_DISCONNECTED);
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    q.state = QsoFrn::STATE_TX_AUDIO;
+    q.onRxTimeout(q.rx_timeout_timer);
+    assert(f.wire().empty()); // An old RX tail must not poll during TX.
+    q.state = QsoFrn::STATE_IDLE;
+    q.onRxTimeout(q.rx_timeout_timer);
+    assert(f.wire() == "P\r\n");
+  }
+  {
+    FrnFixture f; auto& q = *f.qso;
+    for (int n = 0; n < 35; ++n)
+    {
+      q.reconnect();
+      q.disconnect();
+    }
+    assert(q.connect_retry_cnt == 35 && q.reconnect_timeout_ms == q.RECONNECT_MAX_TIMEOUT);
+    q.connect_retry_cnt = UINT32_MAX;
+    q.reconnect();
+    assert(q.connect_retry_cnt == static_cast<uint64_t>(UINT32_MAX) + 1);
   }
   {
     FrnFixture f; auto& q = *f.qso;
@@ -211,9 +329,14 @@ int main()
     q.state = QsoFrn::STATE_RX_AUDIO;
     q.pending_tx_frames.push_back({});
     q.onConnectTimeout(q.con_timeout_timer);
-    assert(q.state == QsoFrn::STATE_CONNECTING && q.pending_tx_frames.empty());
+    assert(q.state == QsoFrn::STATE_DISCONNECTED && q.pending_tx_frames.empty());
+    assert(q.connect_retry_cnt == 0 && q.reconnect_timer->isEnabled());
+    assert(!q.con_timeout_timer->isEnabled());
+    q.onDelayedReconnect(q.reconnect_timer);
     assert(q.connect_retry_cnt == 1 && q.con_timeout_timer->isEnabled());
+    assert(q.reconnect_timeout_ms == 6000);
   }
   std::cout << "PASS FRN: bounded/mixed-newline lists, RunCmd text delivery, login/recovery, "
-               "split grants, buffered flush, WAV49 bytes, separate codecs, queue bounds/watchdogs\n";
+               "split grants, buffered flush, WAV49 bytes, separate codecs, strict access, "
+               "bounded queues/lists, TX metadata and independent transport watchdogs\n";
 }

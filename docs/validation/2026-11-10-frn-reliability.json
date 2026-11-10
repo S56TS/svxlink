@@ -1,0 +1,297 @@
+{
+  "date": "2026-11-10",
+  "status": "passed_with_resource_observation",
+  "base_commit": "59f9f37743e3b093306eb031c0852579e203624e",
+  "source_sha256": {
+    "src/async/core/AsyncTcpConnection.h": "6965df5cdf544c101df7be1fdbfc608307bb35441ef8e2ea1ac19def93dcecd0",
+    "src/svxlink/modules/frn/ModuleFrn.cpp": "69385d65374bef7293536cc5cd51cb60ac8524380d75a07570cc6adac4888c00",
+    "src/svxlink/modules/frn/QsoFrn.cpp": "b417ab80c01d67365c3937d48b8bafd930a00a8cacffe38b9ecf1f0893ecd3fd",
+    "src/svxlink/modules/frn/QsoFrn.h": "7ff889e90197820836176f6ec01d7aa4f10f7d6d3766216e32953dce4d9aca32",
+    "tests/frn_merge.cpp": "13a8910694849705e832b65ae2b703dbddfcc0d654996563fea9f5714be7ee79",
+    "tests/frn_liveness.py": "170252501e5f5786b35e0fafaf4713cf8a089bcf30cca3a203d1470648c5f38e",
+    "tests/frn_negative_control.py": "20333b058e107a31460c225e2121f3a1adf081340207bdfdf28fdf20478e240e",
+    "tests/frn_routing_virtual.py": "ea9a121401439c60d94ced26ba77147de0e5f10b009e1a6f5a364bb93a7e92d3",
+    "tests/test_upstream_merge.py": "c46eb034396317e444fe695bd1bf779ced2fa2f701da968bc35b6ca64cd0e88c",
+    "tests/soak_support.py": "fdcff2ca6eb23f2afe36e83b141c0dd8c75529bd6ba7d7e2726c899a1f6fff88",
+    "tests/chat_test_logic.cpp": "4473b7586ab102c6090dc4a917f8eb9ef2f6db7d54beb4455d31260968a134d2"
+  },
+  "liveness": [
+    {
+      "status": "passed",
+      "mode": "native",
+      "measurements": {
+        "silent_peer_tx_seconds": 65.96409114800008,
+        "silent_peer_tx_frames": 335,
+        "stalled_peer_recovery_seconds": 52.369611505000194,
+        "duplicate_rejections": 2,
+        "backup_recovery": true,
+        "resumed_without_rf_rekey": true,
+        "abortive_close_verified": true,
+        "transport_recovery_with_incoming_metadata_seconds": 40.686223233999954,
+        "late_idle_tx_grant_delay_seconds": 4,
+        "silent_idle_recovery_seconds": 34.98907756199992
+      },
+      "shutdown_returncode": 0,
+      "module_sha256": "710193acc631d1ed3a638e43035fa1333a430197f554a843cb0b497353e3bf56"
+    },
+    {
+      "status": "passed",
+      "mode": "arm64-qemu",
+      "measurements": {
+        "silent_peer_tx_seconds": 66.01093924400016,
+        "silent_peer_tx_frames": 335,
+        "stalled_peer_recovery_seconds": 52.36629951400005,
+        "duplicate_rejections": 2,
+        "backup_recovery": true,
+        "resumed_without_rf_rekey": true,
+        "abortive_close_verified": true,
+        "transport_recovery_with_incoming_metadata_seconds": 40.9877694490001,
+        "late_idle_tx_grant_delay_seconds": 4,
+        "silent_idle_recovery_seconds": 34.9859962349999
+      },
+      "shutdown_returncode": 0,
+      "module_sha256": "4cbeece61f55b1db91edb46e40cfe7690c6031e84cd740f1fb372de50c64c7a8"
+    }
+  ],
+  "regressions": [
+    {
+      "mode": "native",
+      "suite": "frn-regressions",
+      "passed_checks": [
+        "PASS HIDRAW: polarity, first reconnect report, short/EINTR writes, startup retry, capped backoff, EOF/error recovery, squelch fail-closed",
+        "PASS FRN: bounded/mixed-newline lists, RunCmd text delivery, login/recovery, split grants, buffered flush, WAV49 bytes, separate codecs, strict access, bounded queues/lists, TX metadata and independent transport watchdogs",
+        "PASS framed TCP: 1000 interrupted-body reconnects, split fresh frames and batched frames",
+        "PASS Async callback lifetime: 100 self-deleting timers, read/write watches and Exec exit callbacks",
+        "PASS X509 IPv4 SAN: bounded four-byte reads and exact network-order addresses",
+        "PASS PTT: TX_DELAY=0 ms, first audio=80.2618 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=100 ms, first audio=180.33 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=300 ms, first audio=380.6 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=600 ms, first audio=680.313 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks"
+      ],
+      "log_sha256": "a0c52915676f7ea4d9090e9aa79d3a085be91415d0320c28e7749015a4352504"
+    },
+    {
+      "mode": "native",
+      "suite": "frn-final-unit",
+      "passed_checks": [
+        "PASS FRN: bounded/mixed-newline lists, RunCmd text delivery, login/recovery, split grants, buffered flush, WAV49 bytes, separate codecs, strict access, bounded queues/lists, TX metadata and independent transport watchdogs"
+      ],
+      "log_sha256": "a5c18c181474d57c954834d372cc46460bc9b7736fb9358442b49ab49752fb71"
+    },
+    {
+      "mode": "arm64",
+      "suite": "frn-regressions",
+      "passed_checks": [
+        "PASS HIDRAW: polarity, first reconnect report, short/EINTR writes, startup retry, capped backoff, EOF/error recovery, squelch fail-closed",
+        "PASS FRN: bounded/mixed-newline lists, RunCmd text delivery, login/recovery, split grants, buffered flush, WAV49 bytes, separate codecs, strict access, bounded queues/lists, TX metadata and independent transport watchdogs",
+        "PASS framed TCP: 1000 interrupted-body reconnects, split fresh frames and batched frames",
+        "PASS Async callback lifetime: 100 self-deleting timers, read/write watches and Exec exit callbacks",
+        "PASS X509 IPv4 SAN: bounded four-byte reads and exact network-order addresses",
+        "PASS PTT: TX_DELAY=0 ms, first audio=81.0065 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=100 ms, first audio=181.467 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=300 ms, first audio=381.405 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks",
+        "PASS PTT: TX_DELAY=600 ms, first audio=681.405 ms with backpressure, exact samples, PTT released; S16 boundaries/chunks"
+      ],
+      "log_sha256": "1c1b51c765c089d55360650c37e25cbb271dac6fce385d1df2a1c5f5cd01f400"
+    },
+    {
+      "mode": "arm64",
+      "suite": "frn-final-unit",
+      "passed_checks": [
+        "PASS FRN: bounded/mixed-newline lists, RunCmd text delivery, login/recovery, split grants, buffered flush, WAV49 bytes, separate codecs, strict access, bounded queues/lists, TX metadata and independent transport watchdogs"
+      ],
+      "log_sha256": "e8e897c3783ac9f7b787354a460835223cb1764ec70a21559b34cd902a06d3c3"
+    }
+  ],
+  "soaks": [
+    {
+      "status": "failed",
+      "requested_seconds": 300.0,
+      "pid": 1235,
+      "mode": "native",
+      "build": "/mnt/c/Users/sound/Documents/GitHub/svxlink/build-cross/frn-native-asan",
+      "counters": {
+        "cycles": 23,
+        "frn_midframe_disconnects": 23,
+        "helper_midframe_disconnects": 23,
+        "active_rx_disconnects": 23,
+        "max_ptt_release_ms": 1119.1451280000138,
+        "grant_timeouts": 2,
+        "health_checks": 277,
+        "max_health_latency_ms": 105.77875300003825,
+        "max_reply_latency_ms": 907.4873559999332,
+        "max_reconnect_latency_ms": 14471.888597000088
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "87de16e3b6669ff552c54a3f9509a6c0703c61c834a3183ef7d832d43d478f79",
+        "lib/libasynccore.so": "5482e087b7d6255f05e1c99635236d70ecd47050ee10fd9e0b64bc85ac7a2d62",
+        "lib/libasynccpp.so": "e2987e6a256a1db9cc6257e88608c276df6d844b202a0b500500bc8714a54fb4",
+        "lib/libasyncaudio.so": "04f72782b75a1edb096d630c22a7cee462a362ee53faac42e4d51cd04d73337c",
+        "lib/RepeaterLogic.so": "b0b68371f1816b6864f3759f17c21b7e87e87d35140df7d625ef8dce929330ce",
+        "lib/ModuleFrn.so": "7834da4ec9111e3dcc2bf89ac414001eff8b73460ff112299aca31bbe764ba5e",
+        "lib/ChatLogic.so": "0daf6fe4e64b303a11d9679f836fa65d30e2b571d34c9f682c8f6c0dbba13b0b"
+      },
+      "warmup_seconds": 100.0,
+      "rss_growth_kib": 24282.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 198472,
+      "first_window_median_rss_kib": 168870.0,
+      "last_window_median_rss_kib": 193152.0,
+      "error": "AssertionError('RSS grew by 24282.0 KiB after warm-up')",
+      "elapsed_seconds": 304.74674153899997,
+      "asan_options": "default; no explicit quarantine override",
+      "full_report_sha256": "2798308e990841c194077748c23220dfa2ff835a244bda5b5856760f361428e7"
+    },
+    {
+      "status": "passed",
+      "requested_seconds": 300.0,
+      "pid": 1349,
+      "mode": "native",
+      "build": "/mnt/c/Users/sound/Documents/GitHub/svxlink/build-cross/frn-native-asan",
+      "counters": {
+        "cycles": 23,
+        "frn_midframe_disconnects": 23,
+        "helper_midframe_disconnects": 23,
+        "active_rx_disconnects": 23,
+        "max_ptt_release_ms": 1121.9474419999642,
+        "grant_timeouts": 2,
+        "health_checks": 277,
+        "max_health_latency_ms": 105.38609100001395,
+        "max_reply_latency_ms": 907.4065329999712,
+        "max_reconnect_latency_ms": 14474.553173999993
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "87de16e3b6669ff552c54a3f9509a6c0703c61c834a3183ef7d832d43d478f79",
+        "lib/libasynccore.so": "5482e087b7d6255f05e1c99635236d70ecd47050ee10fd9e0b64bc85ac7a2d62",
+        "lib/libasynccpp.so": "e2987e6a256a1db9cc6257e88608c276df6d844b202a0b500500bc8714a54fb4",
+        "lib/libasyncaudio.so": "04f72782b75a1edb096d630c22a7cee462a362ee53faac42e4d51cd04d73337c",
+        "lib/RepeaterLogic.so": "b0b68371f1816b6864f3759f17c21b7e87e87d35140df7d625ef8dce929330ce",
+        "lib/ModuleFrn.so": "7834da4ec9111e3dcc2bf89ac414001eff8b73460ff112299aca31bbe764ba5e",
+        "lib/ChatLogic.so": "0daf6fe4e64b303a11d9679f836fa65d30e2b571d34c9f682c8f6c0dbba13b0b"
+      },
+      "warmup_seconds": 100.0,
+      "rss_growth_kib": 6238.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 170460,
+      "first_window_median_rss_kib": 163810.0,
+      "last_window_median_rss_kib": 170048.0,
+      "elapsed_seconds": 304.753284096,
+      "shutdown_returncode": 0,
+      "asan_options": "detect_leaks=1:halt_on_error=1:abort_on_error=1:quarantine_size_mb=16",
+      "full_report_sha256": "7a62fd32bfac2340d49c9d81151b938464c6e05764fbc544d3d9b0633036bd75"
+    },
+    {
+      "status": "passed",
+      "requested_seconds": 180.0,
+      "pid": 378,
+      "mode": "native",
+      "build": "/mnt/c/Users/sound/Documents/GitHub/svxlink/build-cross/frn-native-asan",
+      "counters": {
+        "cycles": 14,
+        "frn_midframe_disconnects": 14,
+        "helper_midframe_disconnects": 14,
+        "active_rx_disconnects": 14,
+        "max_ptt_release_ms": 1119.1179630000079,
+        "grant_timeouts": 1,
+        "health_checks": 165,
+        "max_health_latency_ms": 105.5731139999807,
+        "max_reply_latency_ms": 896.691993000104,
+        "max_reconnect_latency_ms": 14480.54010099986
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "87de16e3b6669ff552c54a3f9509a6c0703c61c834a3183ef7d832d43d478f79",
+        "lib/libasynccore.so": "5482e087b7d6255f05e1c99635236d70ecd47050ee10fd9e0b64bc85ac7a2d62",
+        "lib/libasynccpp.so": "e2987e6a256a1db9cc6257e88608c276df6d844b202a0b500500bc8714a54fb4",
+        "lib/libasyncaudio.so": "04f72782b75a1edb096d630c22a7cee462a362ee53faac42e4d51cd04d73337c",
+        "lib/RepeaterLogic.so": "b0b68371f1816b6864f3759f17c21b7e87e87d35140df7d625ef8dce929330ce",
+        "lib/ModuleFrn.so": "7834da4ec9111e3dcc2bf89ac414001eff8b73460ff112299aca31bbe764ba5e",
+        "lib/ChatLogic.so": "0daf6fe4e64b303a11d9679f836fa65d30e2b571d34c9f682c8f6c0dbba13b0b"
+      },
+      "warmup_seconds": 60.0,
+      "rss_growth_kib": 408.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 133728,
+      "first_window_median_rss_kib": 133244.0,
+      "last_window_median_rss_kib": 133652.0,
+      "first_window_live_heap_bytes": 1818092.0,
+      "last_window_live_heap_bytes": 1817112.0,
+      "live_heap_growth_bytes": -980.0,
+      "elapsed_seconds": 181.55117943900018,
+      "shutdown_returncode": 0,
+      "asan_options": "detect_leaks=1:halt_on_error=1:abort_on_error=1:quarantine_size_mb=0",
+      "full_report_sha256": "6fd750537509859a5ffa5aeed44deffcad33c32ab5298f52fb772cd24043a71a"
+    },
+    {
+      "status": "passed",
+      "requested_seconds": 180.0,
+      "pid": 443,
+      "mode": "native",
+      "build": "/mnt/c/Users/sound/Documents/GitHub/svxlink/build-cross/frn-native-asan",
+      "counters": {
+        "cycles": 14,
+        "frn_midframe_disconnects": 14,
+        "helper_midframe_disconnects": 14,
+        "active_rx_disconnects": 14,
+        "max_ptt_release_ms": 1117.5810709999041,
+        "grant_timeouts": 1,
+        "health_checks": 165,
+        "max_health_latency_ms": 105.29470800020135,
+        "max_reply_latency_ms": 896.7410640000253,
+        "max_reconnect_latency_ms": 14467.102565999994
+      },
+      "runtime_sha256": {
+        "bin/svxlink": "87de16e3b6669ff552c54a3f9509a6c0703c61c834a3183ef7d832d43d478f79",
+        "lib/libasynccore.so": "5482e087b7d6255f05e1c99635236d70ecd47050ee10fd9e0b64bc85ac7a2d62",
+        "lib/libasynccpp.so": "e2987e6a256a1db9cc6257e88608c276df6d844b202a0b500500bc8714a54fb4",
+        "lib/libasyncaudio.so": "04f72782b75a1edb096d630c22a7cee462a362ee53faac42e4d51cd04d73337c",
+        "lib/RepeaterLogic.so": "b0b68371f1816b6864f3759f17c21b7e87e87d35140df7d625ef8dce929330ce",
+        "lib/ModuleFrn.so": "710193acc631d1ed3a638e43035fa1333a430197f554a843cb0b497353e3bf56",
+        "lib/ChatLogic.so": "0daf6fe4e64b303a11d9679f836fa65d30e2b571d34c9f682c8f6c0dbba13b0b"
+      },
+      "warmup_seconds": 60.0,
+      "rss_growth_kib": 10876.0,
+      "fd_growth": 0.0,
+      "peak_rss_kib": 164368,
+      "first_window_median_rss_kib": 152716.0,
+      "last_window_median_rss_kib": 163592.0,
+      "first_window_live_heap_bytes": 1818092.0,
+      "last_window_live_heap_bytes": 1817112.0,
+      "live_heap_growth_bytes": -980.0,
+      "elapsed_seconds": 181.548328846,
+      "shutdown_returncode": 0,
+      "asan_options": "detect_leaks=1:halt_on_error=1:abort_on_error=1:quarantine_size_mb=16",
+      "full_report_sha256": "412818fbf87cbc9c077cdd9b9686819315040f66996c79a7ce6f8f7985e50b1c"
+    }
+  ],
+  "negative_control": {
+    "status": "expected_failure",
+    "restored_defect": "receive-only watchdog during healthy TX",
+    "returncode": 1,
+    "detected_by": "65-second silent-peer transmission",
+    "log_sha256": "0fdece73ac7f228c335dbee1cba9db83e085ee1fef05d7ffddce240c8a20401a"
+  },
+  "sanitizer_log_scan": {
+    "errors_found": 0,
+    "logs": [
+      "frn-arm-build.log",
+      "frn-final-unit-arm64.log",
+      "frn-final-unit-native.log",
+      "frn-liveness-arm64.log",
+      "frn-liveness-native.log",
+      "frn-regressions-arm64.log",
+      "frn-regressions-native.log",
+      "frn-soak-bounded-native.log",
+      "frn-soak-final-abort-native.log",
+      "frn-soak-final-native.log",
+      "frn-soak-heap-native.log"
+    ]
+  },
+  "resource_observation": "The initial default-quarantine run failed the RSS-growth budget and is retained. The explicit 16 MiB quarantine follow-up uses the documented soak procedure. The live-allocation comparison and clean sanitizer shutdown are evidence consistent with sanitizer retention, not a guarantee of indefinite runtime stability.",
+  "build_note": "Cleared stale PC_GPIOD package-cache data; ARM64 sysroot uses libgpiod 2.2.1. No GPIO source changes.",
+  "limits": [
+    "Local loopback FRN peers, not the actual AlterFRN server.",
+    "ARM64 is user-mode QEMU, not physical Pi hardware.",
+    "No RF, USB unplug/replug or physical PTT/CTCSS test.",
+    "The pre-existing modified ARM64 prebuilt bundle was not regenerated."
+  ]
+}

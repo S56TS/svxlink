@@ -40,6 +40,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <vector>
 #include <deque>
 #include <array>
+#include <chrono>
 #include <sigc++/sigc++.h>
 
 
@@ -254,6 +255,13 @@ class QsoFrn
       * @return true if qso is connected
       */
      bool isConnected() const { return state >= STATE_IDLE; }
+
+     bool isTransmitting() const
+     {
+       const State st = audioState();
+       return st == STATE_TX_AUDIO || st == STATE_TX_AUDIO_WAITING ||
+              st == STATE_TX_AUDIO_APPROVED;
+     }
 
      /**
       * @brief return number of clients on the channel
@@ -523,10 +531,11 @@ public:
     void onSendBufferFull(bool is_full);
 
     /**
-     * @brief Called when no pings were received during timeout time
+     * @brief Recover a stalled connection, login or protocol exchange
      *
-     * Initiates reconnection when no pings/data was received from
-     * the FRN serer during timeout time.
+     * Completed received data and outgoing voice refresh this watchdog.
+     * Outgoing data has a separate transport progress check, so simply
+     * queueing voice cannot conceal a broken network connection.
      */
     void onConnectTimeout(Async::Timer *timer);
 
@@ -574,6 +583,11 @@ public:
     static const int        KEEPALIVE_TIMEOUT_TIME  = 5000;
     static const int        TX_GRANT_TIMEOUT_TIME    = 10000;
     static const int        TX_GRANT_BUFFER_FRAMES   = 50;
+    static const size_t     MAX_PENDING_WRITE_BYTES = 32768;
+    static const size_t     MAX_TEXT_QUEUE_BYTES    = 65536;
+    static const size_t     MAX_TEXT_QUEUE_ITEMS    = 64;
+    static const size_t     MAX_PROTOCOL_LINE_BYTES = 65536;
+    static const size_t     MAX_LIST_BYTES          = 1048576;
 
     static const int        RECONNECT_TIMEOUT_TIME  = 5*1000;
     static const int        RECONNECT_MAX_TIMEOUT   = 2*60*1000;
@@ -581,7 +595,8 @@ public:
 
     bool                init_ok;
 
-    Async::TcpClient<>* tcp_client;
+    class FrnTcpClient;
+    FrnTcpClient*       tcp_client;
     Async::Timer *      rx_timeout_timer;
     Async::Timer *      con_timeout_timer;
     Async::Timer *      tx_wait_timer;
@@ -600,13 +615,26 @@ public:
     void tmOutSendNext(Async::Timer* t);
     bool writeAll(const std::string& out);
     void finishReceiveAudio();
+    void clearSession();
+    bool checkSendProgress();
+    void onTransportTimeout(Async::Timer* timer);
+    bool checkProtocolLine(const unsigned char* data, int len);
+    State audioState() const;
+    typedef std::chrono::steady_clock Clock;
+    Clock::time_point send_progress_at;
+    Clock::time_point list_started_at;
+    uint64_t submitted_bytes = 0;
+    uint64_t acknowledged_bytes = 0;
+    size_t list_bytes = 0;
+    State list_return_state = STATE_IDLE;
+    Async::Timer* transport_timer;
 
     bool writeFrame(const char* tag, const std::string& frame);
     static std::string headPreview(const std::string& s, size_t n = 40);
 
     Async::Timer *      reconnect_timer;
     State               state;
-    int                 connect_retry_cnt;
+    uint64_t            connect_retry_cnt;
     short               receive_buffer[BUFFER_SIZE];
     short               send_buffer[BUFFER_SIZE];
     int                 send_buffer_cnt;

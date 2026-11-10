@@ -250,6 +250,14 @@ class TcpConnection : virtual public sigc::trackable
     virtual int write(const void *buf, int count);
 
     /**
+     * @brief Bytes still buffered by Async, not yet handed to the OS
+     *
+     * This excludes the kernel send queue and is not a delivery receipt.
+     * Applications may use it to bound their own outgoing queues.
+     */
+    size_t pendingWriteBytes(void) const { return m_write_buf.size(); }
+
+    /**
      * @brief   Get the local IP address associated with this connection
      * @return  Returns an IP address
      */

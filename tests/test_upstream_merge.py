@@ -20,7 +20,7 @@ def main():
     parser.add_argument('--build', type=Path, required=True)
     parser.add_argument('--sysroot', type=Path)
     parser.add_argument('--sanitizers', action='store_true', help='Native ASan/UBSan build')
-    parser.add_argument('--only', choices=('all', 'timing'), default='all')
+    parser.add_argument('--only', choices=('all', 'timing', 'frn'), default='all')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     build = args.build.resolve()
@@ -104,6 +104,9 @@ public:
         frn = temp / 'frn'
         subprocess.run([*compiler, str(unit), str(root / 'src/svxlink/modules/frn/Utils.cpp'),
                         *linker, '-o', str(frn)], check=True)
+        if args.only == 'frn':
+            execute(frn)
+            return
         framed = temp/'framed'
         subprocess.run([*compiler, str(root/'tests/framed_reconnect.cpp'),
                         *linker,'-o',str(framed)],check=True)

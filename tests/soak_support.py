@@ -42,6 +42,7 @@ async def run_soak(args,root,process,peer,packet,connections,helper_ready,
               'grant_timeouts':0,'health_checks':0,'max_health_latency_ms':0,
               'max_reply_latency_ms':0,'max_reconnect_latency_ms':0}
     result={'status':'running','requested_seconds':args.soak_seconds,
+            'asan_options':os.environ.get('ASAN_OPTIONS','default'),
             'pid':process.pid,'mode':'arm64-qemu' if args.sysroot else 'native',
             'build':str(args.original_build),'counters':counters,'samples':samples,
             'runtime_sha256':{str(path.relative_to(args.build)):hashlib.sha256(path.read_bytes()).hexdigest()
@@ -83,6 +84,11 @@ async def run_soak(args,root,process,peer,packet,connections,helper_ready,
             for line in Path(f'/proc/{process.pid}/status').read_text().splitlines():
                 key,_,value=line.partition(':')
                 if key in ('VmRSS','VmHWM','RssAnon','Threads'): status[key]=int(value.split()[0])
+            heap_path=root/'heap.txt'
+            if heap_path.exists():
+                heap_lines=heap_path.read_text().splitlines()
+                if heap_lines:
+                    status['live_heap_bytes']=int(heap_lines[-1].split()[1])
             samples.append({'seconds':time.monotonic()-started,**status,
                             'fds':len(list(Path(f'/proc/{process.pid}/fd').iterdir())),
                             'health_latency_ms':latency})
@@ -175,6 +181,12 @@ async def run_soak(args,root,process,peer,packet,connections,helper_ready,
                       peak_rss_kib=max(s['VmRSS'] for s in samples),
                       first_window_median_rss_kib=statistics.median(s['VmRSS'] for s in first),
                       last_window_median_rss_kib=statistics.median(s['VmRSS'] for s in last))
+        if all('live_heap_bytes' in s for s in first+last):
+            heap_first=statistics.median(s['live_heap_bytes'] for s in first)
+            heap_last=statistics.median(s['live_heap_bytes'] for s in last)
+            result.update(first_window_live_heap_bytes=heap_first,last_window_live_heap_bytes=heap_last,
+                          live_heap_growth_bytes=heap_last-heap_first)
+            assert heap_last-heap_first<1048576, 'Live heap grew by more than 1 MiB after warm-up'
         assert rss_growth<16384,f'RSS grew by {rss_growth} KiB after warm-up'
         assert fd_growth<=4,f'Possible descriptor leak: median growth {fd_growth}'
         assert counters['cycles']>0

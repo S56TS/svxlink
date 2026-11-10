@@ -7,6 +7,7 @@ across repeated traffic/faults and records resources with --soak-report.
 """
 import argparse
 import asyncio
+import socket
 import json
 import os
 from pathlib import Path
@@ -80,13 +81,16 @@ async def main():
     parser.add_argument('--soak-report', type=Path)
     parser.add_argument('--soak-log', type=Path)
     parser.add_argument('--frn-debug', action='store_true')
+    parser.add_argument('--frn-liveness', action='store_true',
+                        help='Real-time long TX, blocked TCP, duplicate-login and idle recovery checks')
+    parser.add_argument('--liveness-report', type=Path)
     args = parser.parse_args()
     args.build=args.build.resolve()
     if args.sysroot: args.sysroot=args.sysroot.resolve()
     with tempfile.TemporaryDirectory(prefix='frn-radio-chat-') as directory:
         root=Path(directory)
         args.original_build=args.build
-        if args.soak_seconds:
+        if args.soak_seconds or args.frn_liveness:
             # A rebuild must not replace a shared-library inode mapped by an
             # ongoing soak. Give this process an immutable runtime snapshot.
             from soak_support import freeze_build
@@ -97,29 +101,55 @@ async def main():
         frames, captured, tasks, writers = [], [], [], []
         helper_writers=[]
         stats={'frn_connections':0, 'helper_connections':0, 'frn_frames':0,
-               'helper_audio_bytes':0, 'grant_tx':True, 'last_helper_events':[]}
+               'helper_audio_bytes':0, 'grant_tx':True, 'last_helper_events':[],
+               'frn_tx_requests':0, 'frn_rx0':0, 'pings_during_tx':0,
+               'frn_rejected_logins':0, 'frn_login_replies':[], 'frn_grant_delay':0,
+               'frn_reset_peers':[]}
         played=asyncio.Event()
         helper_ready=asyncio.Event()
         reply=(3500*np.sin(2*np.pi*1000*np.arange(8000)/16000)).astype('<i2').tobytes()
         async def frn(reader,writer):
             writers.append(writer)
+            peer_id=writer.get_extra_info('peername')
             try:
+                if args.frn_liveness:
+                    writer.get_extra_info('socket').setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
                 login=await reader.readline()
                 assert login.startswith(b'CT:'), login
-                writer.write(b'2014003\r\n<AL>OK</AL>\r\n'); await writer.drain()
+                access=stats['frn_login_replies'].pop(0) if stats['frn_login_replies'] else 'OK'
+                writer.write(b'2014003\r\n<AL>'+access.encode()+b'</AL>\r\n'); await writer.drain()
+                if access not in ('OK','ADMIN','OWNER','NETOWNER'):
+                    stats['frn_rejected_logins']+=1
+                    try:
+                        assert await reader.readline()==b'', 'Rejected login was treated as connected'
+                    except ConnectionResetError:
+                        stats['frn_reset_peers'].append(peer_id)
+                    return
                 assert await reader.readline()==b'RX0\r\n'
+                stats['frn_rx0']+=1
                 stats['frn_connections']+=1
                 frn_connected.put_nowait(writer)
+                transmitting=False
                 while line := await reader.readline():
                     if line==b'TX0\r\n':
+                        stats['frn_tx_requests']+=1
                         if stats['grant_tx']:
+                            if stats['frn_grant_delay']:
+                                await asyncio.sleep(stats['frn_grant_delay'])
+                            transmitting=True
                             writer.write(b'\x01\x00\x01'); await writer.drain()
                     elif line==b'TX1\r\n':
                         frames.append(await reader.readexactly(325))
                         stats['frn_frames']+=1
                     elif line==b'RX0\r\n':
+                        stats['frn_rx0']+=1
+                        transmitting=False
                         writer.write(b'\x00'); await writer.drain()
-                    else: assert line==b'P\r\n', line
+                    else:
+                        assert line==b'P\r\n', line
+                        if transmitting: stats['pings_during_tx']+=1
+            except ConnectionResetError:
+                stats['frn_reset_peers'].append(peer_id)
             except (asyncio.IncompleteReadError, ConnectionError): pass
         async def helper(reader,writer):
             writers.append(writer)
@@ -147,6 +177,7 @@ async def main():
         def accept(handler):
             return lambda reader,writer: tasks.append(asyncio.create_task(handler(reader,writer)))
         frn_server=await asyncio.start_server(accept(frn),'127.0.0.1',0)
+        frn_backup=await asyncio.start_server(accept(frn),'127.0.0.1',0) if args.frn_liveness else frn_server
         helper_server=await asyncio.start_server(accept(helper),'127.0.0.1',0)
         frn_port=frn_server.sockets[0].getsockname()[1]
         helper_port=helper_server.sockets[0].getsockname()[1]
@@ -179,6 +210,7 @@ STATS_HISTORY_PATH={root/'history'}
 TYPE=VirtualRadio
 INPUT_FILE={root/'input.pcm'}
 OUTPUT_FILE={root/'linked.f32'}
+HEAP_REPORT_FILE={root/'heap.txt'}
 START_MS=0
 [RepeaterLogic]
 TYPE=Repeater
@@ -228,7 +260,7 @@ MUTE_LOGIC_LINKING=0
 SERVER=127.0.0.1
 PORT={frn_port}
 SERVER_BACKUP=127.0.0.1
-PORT_BACKUP={frn_port}
+PORT_BACKUP={frn_backup.sockets[0].getsockname()[1]}
 EMAIL_ADDRESS=test@example.invalid
 DYN_PASSWORD=disposable-test
 CALLSIGN_AND_USER=TEST
@@ -244,8 +276,8 @@ VERSION=2014003
                   stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.STDOUT)
         output_task=asyncio.create_task(process.stdout.read())
         try:
-            async with asyncio.timeout(40+args.soak_seconds+90*(args.soak_seconds>0)):
-                await helper_ready.wait()
+            async with asyncio.timeout(40+args.soak_seconds+90*(args.soak_seconds>0)+320*args.frn_liveness):
+                await asyncio.wait_for(helper_ready.wait(),15)
                 control(root/'squelch','O')
                 while not (root/'up').exists(): await asyncio.sleep(.02)
                 control(root/'command','EVENT activatefrn\n')
@@ -285,6 +317,9 @@ VERSION=2014003
                 radio=np.frombuffer((root/'transmitted.pcm').read_bytes()[offset:],dtype='<i2')/32768
                 tone_check(radio,16000,1000,'Chat to RF')
                 print('PASS FRN routing: chat reply reaches RF and FRN while ModuleFrn remains active')
+                if args.frn_liveness:
+                    from frn_liveness import run_liveness
+                    peer=await run_liveness(root,control,peer,frn_connected,stats)
                 if args.soak_seconds:
                     from soak_support import run_soak
                     await run_soak(args,root,process,peer,packet,frn_connected,
@@ -304,14 +339,14 @@ VERSION=2014003
             if args.soak_log:
                 args.soak_log.parent.mkdir(parents=True,exist_ok=True)
                 args.soak_log.write_text(output)
-            for server in (frn_server,helper_server): server.close()
+            for server in (frn_server,frn_backup,helper_server): server.close()
             for writer in writers: writer.close()
             results=[]
             for task in tasks:
                 if task.done() and not task.cancelled() and task.exception(): results.append(task.exception())
                 task.cancel()
             await asyncio.gather(*tasks,return_exceptions=True)
-            for server in (frn_server,helper_server): await asyncio.wait_for(server.wait_closed(),3)
+            for server in (frn_server,frn_backup,helper_server): await asyncio.wait_for(server.wait_closed(),3)
         assert not results, results
         if args.soak_report and args.soak_report.exists():
             report=json.loads(args.soak_report.read_text())
@@ -319,6 +354,16 @@ VERSION=2014003
             if process.returncode!=0: report['status']='failed'
             args.soak_report.write_text(json.dumps(report,indent=2)+'\n')
         assert '*** ERROR' not in output and process.returncode==0, output
+        assert not any(marker in output for marker in
+                       ('ERROR: AddressSanitizer', 'ERROR: LeakSanitizer', 'runtime error:')), output
+        if args.liveness_report:
+            import hashlib
+            args.liveness_report.parent.mkdir(parents=True,exist_ok=True)
+            args.liveness_report.write_text(json.dumps({
+                'status':'passed','mode':'arm64-qemu' if args.sysroot else 'native',
+                'measurements':stats['liveness'], 'shutdown_returncode':process.returncode,
+                'module_sha256':hashlib.sha256((args.build/'lib/ModuleFrn.so').read_bytes()).hexdigest(),
+            },indent=2)+'\n')
         print('PASS FRN routing: clean shutdown with active FRN and open RF squelch')
 
 
