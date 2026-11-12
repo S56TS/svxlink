@@ -481,11 +481,6 @@ int main(int argc, char **argv)
           static_cast<unsigned>(configured_interval);
   }
 
-  std::string stats_primary_logic;
-  if(cfg.getValue("GLOBAL", "STATS_PRIMARY_LOGIC", stats_primary_logic) &&
-     !SvxStats::instance().setPrimaryLogic(stats_primary_logic))
-    cerr << "*** ERROR: STATS_PRIMARY_LOGIC is not one of the configured diagnostic logics\n";
-
   SvxStats::instance().setPersistPath(stats_persist_path);
   SvxStats::instance().setSnapshotPath(stats_snapshot_path);
   SvxStats::instance().setHistoryPath(stats_history_path);

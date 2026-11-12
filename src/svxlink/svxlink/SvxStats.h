@@ -49,7 +49,6 @@ public:
                      const std::string& tx);
   void setLogicState(const std::string& name, const std::string& state);
   void setFrnEnabled(const std::string& name, bool enabled);
-  bool setPrimaryLogic(const std::string& name);
   std::vector<std::string> formatDiagnosticGroups(const std::string& scope,
                                                  const std::string& name = "");
 
@@ -332,7 +331,6 @@ private:
   };
   std::map<std::string, LogicStats> logic_states;
   std::vector<std::string> logic_order;
-  std::string primary_logic;
   std::string registry_error = "none";
   LogicStats legacy_totals;
   bool legacy_totals_available = false;

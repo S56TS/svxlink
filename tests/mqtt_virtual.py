@@ -54,7 +54,7 @@ async def main():
                         '-o', str(agent)], check=True)
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]
-        (root/'svxlink.conf').write_text('[GLOBAL]\nLOGICS=RepeaterLogic,SimplexLogic\nSTATS_PRIMARY_LOGIC=SimplexLogic\n[RepeaterLogic]\nCALLSIGN=S56TEST\n')
+        (root/'svxlink.conf').write_text('[GLOBAL]\nLOGICS=RepeaterLogic,SimplexLogic\n[RepeaterLogic]\nCALLSIGN=S56TEST\n')
         (root/'agent.conf').write_text(f'''[agent]
 ENABLED=1
 NODE_ID=S56TEST
@@ -127,11 +127,12 @@ TIMEOUT_MS=1000
             assert topic == 'frn/aiors/v1/S56TEST/telemetry' and qos == 1 and retained
             assert payload['node_id'] == 'S56TEST'
             metrics = payload['metrics']
-            assert len(metrics) >= 361 and metrics['stats_schema'] == 4
+            assert len(metrics) >= 300 and metrics['stats_schema'] == 5
+            assert not any(key.startswith(('frn_', 'rf_', 'cmd_', 'sq_', 'sql_')) for key in metrics)
             assert set(payload['logics']) == {'RepeaterLogic', 'SimplexLogic'}
             assert payload['logics']['RepeaterLogic']['frn_tx_bytes_total'] == 100
             assert payload['logics']['SimplexLogic']['frn_tx_bytes_total'] == 500
-            assert payload['primary_logic'] == 'SimplexLogic'
+            assert 'primary_logic' not in payload and 'logic' not in payload
             for key in ('ai', 'bi', 'ae', 'be'):
                 assert isinstance(metrics[f'aiors_radio_{key}_status'], str)
             await wait_for(lambda: not rows())

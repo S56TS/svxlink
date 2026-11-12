@@ -177,7 +177,6 @@ bool SvxStats::registerLogic(const std::string& name, const std::string& type,
   LogicStats& ls = logic_states[name];
   ls.name = name; ls.type = type; ls.callsign = callsign; ls.rx = rx; ls.tx = tx;
   logic_order.push_back(name);
-  if(primary_logic.empty()) primary_logic = name;
   return true;
 }
 
@@ -199,12 +198,6 @@ void SvxStats::setFrnEnabled(const std::string& name, bool enabled)
   if(ls) ls->frn_enabled = enabled;
 }
 
-bool SvxStats::setPrimaryLogic(const std::string& name)
-{
-  if(!findLogic(name)) return false;
-  primary_logic = name;
-  return true;
-}
 
 SvxStats::~SvxStats()
 {
@@ -692,8 +685,6 @@ std::string SvxStats::formatLogicMetrics(LogicStats& ls, double now_s)
      << " frn_users=" << ls.frn_users_cur
      << " frn_users_peak_1h=" << peak_1h
      << " frn_users_unique_1h=" << unique_1h
-     << " frn_link_up_1h=" << link_up_1h
-     << " frn_link_down_1h=" << link_down_1h
      << " frn_user_join_1h=" << join_1h
      << " frn_user_leave_1h=" << leave_1h
 
@@ -764,8 +755,8 @@ std::string SvxStats::formatNodeStatsLine(double now_s) const
 {
   std::ostringstream os;
   os.setf(std::ios::fixed);
-  os << "STATS stats_schema=4 ts_unix_s=" << unix_now_sec()
-     << " uptime_s=" << uptimeSeconds() << " linux_uptime_s=" << linuxUptimeSeconds()
+  os << "STATS stats_schema=5 ts_unix_s=" << unix_now_sec()
+     << " linux_uptime_s=" << linuxUptimeSeconds()
      << " svxlink_uptime_s=" << uptimeSeconds()
      << " svxlink_software_version=" << stats_token(SVXLINK_APP_VERSION)
      << " svxlink_software_revision=" << stats_token(PROJECT_VERSION)
@@ -773,7 +764,6 @@ std::string SvxStats::formatNodeStatsLine(double now_s) const
      << " logic_count=" << logic_order.size()
      << " logic_registry_error=" << registry_error
      << " legacy_logic_totals_available=" << (legacy_totals_available ? 1 : 0);
-  if(!primary_logic.empty()) os << " primary_logic=" << logic_token(primary_logic);
   appendAiorsStats(os, now_s);
   return os.str();
 }
@@ -786,7 +776,6 @@ std::string SvxStats::formatStatsLine()
   for(size_t slot=0; slot<logic_order.size(); ++slot) {
     LogicStats& ls = logic_states.at(logic_order[slot]);
     const std::string metrics = formatLogicMetrics(ls, now_s);
-    if(ls.name == primary_logic) os << " " << metrics; // Temporary legacy aliases.
     const std::string prefix = "logic" + std::to_string(slot) + "_";
     os << " " << prefix << "name=" << logic_token(ls.name)
        << " " << prefix << "type=" << logic_token(ls.type)

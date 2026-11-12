@@ -166,7 +166,6 @@ int main(int argc, char** argv)
   assert(second.cmd_total.ok == 0 && second.cmd_total.rej == 1);
   assert(!stats.registerLogic("Third", "Repeater", "X", "Rx1", "Tx1"));
   assert(!stats.registerLogic("RepeaterLogic", "Repeater", "X", "Rx1", "Tx1"));
-  assert(stats.setPrimaryLogic("SimplexLogic"));
 
   const auto snapshot = stats.formatStatsLine();
   assert(snapshot.find(" aiors_radio_ai_status=disabled") != std::string::npos);
@@ -182,10 +181,16 @@ int main(int argc, char** argv)
     assert(keys.insert(token.substr(0, token.find('='))).second);
   assert(keys.size() <= 1024);
   assert(snapshot.find(" logic_count=2") != std::string::npos);
-  assert(snapshot.find(" primary_logic=SimplexLogic") != std::string::npos);
+  assert(snapshot.find(" primary_logic=") == std::string::npos);
+  assert(snapshot.find(" stats_schema=5") != std::string::npos);
+  assert(snapshot.find(" uptime_s=") == std::string::npos);
+  assert(snapshot.find("frn_link_up_1h=") == std::string::npos);
+  assert(snapshot.find("frn_link_down_1h=") == std::string::npos);
   assert(snapshot.find(" logic0_frn_tx_bytes_total=100") != std::string::npos);
   assert(snapshot.find(" logic1_frn_tx_bytes_total=500") != std::string::npos);
-  assert(snapshot.find(" frn_tx_bytes_total=500") != std::string::npos);
+  for(const auto& key : keys)
+    assert(key.rfind("frn_",0) && key.rfind("rf_",0) && key.rfind("cmd_",0) &&
+           key.rfind("sq_",0) && key.rfind("sql_",0) && key != "counter_epoch_unix_s");
   assert(snapshot.find("logic0_aiors_") == std::string::npos);
   assert(snapshot.find("logic1_aiors_") == std::string::npos);
 

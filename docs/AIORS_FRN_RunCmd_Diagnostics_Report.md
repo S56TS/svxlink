@@ -128,7 +128,6 @@ Logic names may be chosen freely; their TYPE controls behavior:
 ```ini
 [GLOBAL]
 LOGICS=LocalRepeater,LocalSimplex
-STATS_PRIMARY_LOGIC=LocalRepeater
 STATS_INTERVAL=600
 STATS_AIORS_SAMPLE_INTERVAL=30
 
@@ -150,8 +149,7 @@ RUN_CMD_SECRET=
 
 This is a fragment: retain the normal callsign, audio, PTT/COS and module settings needed by
 your installation. One Simplex plus one Repeater, two Simplex, or two Repeater instances are
-supported. `STATS_PRIMARY_LOGIC` selects only the temporary legacy MQTT metric aliases;
-the first LOGICS entry is the default if it is omitted. It does not change radio routing.
+supported. Each logic has its own statistics; no primary-logic selector is needed.
 
 For two logics, set the existing node identity explicitly in `/etc/aiors-mqtt/agent.conf`:
 
@@ -165,7 +163,7 @@ The node identity remains shared; no second broker account or MQTT service is re
 
 ## History and upgrades
 
-The statistics snapshot is schema 4. AIORS hardware input remains diagnostics schema 5.
+The statistics snapshot is schema 5. AIORS hardware input remains diagnostics schema 5.
 Persistent totals use schema 2 with `logic.<encoded-section-name>.<metric>` entries.
 Shared AIORS energy/fault totals retain their existing keys and continue once per node.
 Old mixed RF/FRN/command totals are preserved under `legacy.*`; they are not copied into
@@ -174,7 +172,7 @@ start with their own epoch. A renamed section starts a new identity; reordering 
 
 MQTT keeps its existing node topics and envelope schema 1, adding a `logics` object and
 explicit event scopes. See the deployment MQTT manual for JSON types, server ingestion,
-offline queues and the temporary primary-logic aliases.
+offline queues and the scoped-only logic statistics.
 
 ## Source and validation
 
