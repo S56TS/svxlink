@@ -1082,8 +1082,8 @@ Logic::~Logic(void)
 void Logic::squelchOpen(bool is_open)
 {
   //std::cout << "### Logic::squelchOpen: is_open=" << is_open << std::endl;
-  SvxStats::instance().onSquelchState(is_open);
-  SvxStats::instance().onRfRxState(is_open);
+  SvxStats::instance().onSquelchState(name(), is_open);
+  SvxStats::instance().onRfRxState(name(), is_open);
 
   if (active_module != 0)
   {
@@ -1139,7 +1139,7 @@ bool Logic::getIdleState(void) const
 
 void Logic::transmitterStateChange(bool is_transmitting)
 {
-  SvxStats::instance().onRfTxState(is_transmitting);
+  SvxStats::instance().onRfTxState(name(), is_transmitting);
   if (LocationInfo::has_instance() &&
       (LocationInfo::instance()->getTransmitting(name()) != is_transmitting))
   {

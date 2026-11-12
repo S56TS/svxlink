@@ -481,6 +481,11 @@ int main(int argc, char **argv)
           static_cast<unsigned>(configured_interval);
   }
 
+  std::string stats_primary_logic;
+  if(cfg.getValue("GLOBAL", "STATS_PRIMARY_LOGIC", stats_primary_logic) &&
+     !SvxStats::instance().setPrimaryLogic(stats_primary_logic))
+    cerr << "*** ERROR: STATS_PRIMARY_LOGIC is not one of the configured diagnostic logics\n";
+
   SvxStats::instance().setPersistPath(stats_persist_path);
   SvxStats::instance().setSnapshotPath(stats_snapshot_path);
   SvxStats::instance().setHistoryPath(stats_history_path);
@@ -706,6 +711,16 @@ static void initialize_logics(Config &cfg)
       begin = comma + 1;
     }
     
+    const size_t first = logic_name.find_first_not_of(" \t\r\n");
+    const size_t last = logic_name.find_last_not_of(" \t\r\n");
+    logic_name = first == string::npos ? "" : logic_name.substr(first, last-first+1);
+    string stats_type, stats_callsign, stats_rx, stats_tx;
+    cfg.getValue(logic_name, "TYPE", stats_type);
+    cfg.getValue(logic_name, "CALLSIGN", stats_callsign);
+    cfg.getValue(logic_name, "RX", stats_rx);
+    cfg.getValue(logic_name, "TX", stats_tx);
+    if(!SvxStats::instance().registerLogic(logic_name, stats_type, stats_callsign, stats_rx, stats_tx))
+      cerr << "*** ERROR: diagnostics require at most two distinct named logics\n";
     cout << "\nStarting logic: " << logic_name << endl;
     
     string logic_type;
@@ -713,6 +728,7 @@ static void initialize_logics(Config &cfg)
     {
       cerr << "*** ERROR: Logic TYPE not specified for logic \""
       	   << logic_name << "\". Skipping...\n";
+      SvxStats::instance().setLogicState(logic_name, "failed");
       continue;
     }
     std::string logic_plugin_filename =
@@ -735,9 +751,11 @@ static void initialize_logics(Config &cfg)
     {
       cerr << "*** ERROR: Could not load or initialize Logic object \""
       	   << logic_name << "\". Skipping...\n";
+      SvxStats::instance().setLogicState(logic_name, "failed");
       continue;
     }
 
+    SvxStats::instance().setLogicState(logic_name, "ready");
     logic_vec.push_back(logic);
   } while (comma != logics.end());
   

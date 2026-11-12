@@ -6,6 +6,7 @@
 #include <array>
 #include <deque>
 #include <unordered_map>
+#include <map>
 #include <cstdint>
 #include <iosfwd>
 #include <thread>
@@ -42,6 +43,15 @@ public:
   };
 
   static SvxStats& instance();
+  static constexpr size_t MAX_LOGICS = 2;
+  bool registerLogic(const std::string& name, const std::string& type,
+                     const std::string& callsign, const std::string& rx,
+                     const std::string& tx);
+  void setLogicState(const std::string& name, const std::string& state);
+  void setFrnEnabled(const std::string& name, bool enabled);
+  bool setPrimaryLogic(const std::string& name);
+  std::vector<std::string> formatDiagnosticGroups(const std::string& scope,
+                                                 const std::string& name = "");
 
   // Start periodic STATS logging (safe to call multiple times)
   void start();
@@ -57,26 +67,26 @@ public:
   void savePersistedTotals();
 
   // --- FRN side ---
-  void onFrnClientListUpdate(const std::vector<std::string>& client_list);
-  void onFrnTxState(bool is_tx);
-  void onFrnRxState(bool is_rx);
-  void addFrnTxBytes(uint64_t bytes);
-  void addFrnRxBytes(uint64_t bytes);
+  void onFrnClientListUpdate(const std::string& logic_name, const std::vector<std::string>& client_list);
+  void onFrnTxState(const std::string& logic_name, bool is_tx);
+  void onFrnRxState(const std::string& logic_name, bool is_rx);
+  void addFrnTxBytes(const std::string& logic_name, uint64_t bytes);
+  void addFrnRxBytes(const std::string& logic_name, uint64_t bytes);
   // Link/connectivity (FRN TCP session up/down)
-  void onFrnLinkUp();
-  void onFrnLinkDown();
+  void onFrnLinkUp(const std::string& logic_name);
+  void onFrnLinkDown(const std::string& logic_name);
 
   // --- RF/repeater side ---
-  void onSquelchState(bool is_open);
-  void onRfTxState(bool is_tx);
-  void onRfRxState(bool is_rx);
+  void onSquelchState(const std::string& logic_name, bool is_open);
+  void onRfTxState(const std::string& logic_name, bool is_tx);
+  void onRfRxState(const std::string& logic_name, bool is_rx);
 
   // --- RunCmd ---
-  void onCmdAccepted();
-  void onCmdRejected();
-  void onCmdAuthFailed();
-  void onCmdBroadcastAttempt();
-  void onCmdExecTimeMs(uint32_t ms);
+  void onCmdAccepted(const std::string& logic_name);
+  void onCmdRejected(const std::string& logic_name);
+  void onCmdAuthFailed(const std::string& logic_name);
+  void onCmdBroadcastAttempt(const std::string& logic_name);
+  void onCmdExecTimeMs(const std::string& logic_name, uint32_t ms);
 
   // Format current stats snapshot as a single-line payload (without timestamp)
   std::string formatStatsLine();
@@ -90,7 +100,7 @@ private:
 
   void onTick(Async::Timer* t);
   void onAiorsSampleTimer(Async::Timer* t);
-  void rotateBuckets(uint64_t now_minute);
+
   uint64_t uptimeSeconds() const;
   int64_t linuxUptimeSeconds() const;
   void writeStatsReport(const std::string& line);
@@ -100,6 +110,8 @@ private:
   void recordAiorsFailure(const std::string& reason);
 
 
+
+  static constexpr size_t NBUCKET = 60;
 
   struct Bucket
   {
@@ -116,6 +128,7 @@ private:
     uint64_t frn_link_down = 0;
     uint64_t user_join = 0;
     uint64_t user_leave = 0;
+    uint64_t users_peak = 0;
   };
 
   enum AiorsMetric
@@ -266,42 +279,68 @@ private:
   AiorsWindow aggregateAiorsWindow(double now_s, double window_s) const;
   void appendAiorsStats(std::ostringstream& os, double now_s) const;
 
-  static constexpr size_t NBUCKET = 60;
-  Bucket buckets[NBUCKET];
-  size_t idx = 0;
+  struct LogicStats
+  {
+    LogicStats();
+    std::string name, type, callsign, rx, tx;
+    std::string state = "configured";
+    bool frn_enabled = false;
+    bool frn_link_up = false;
+    uint64_t counter_epoch_unix_s = 0;
+    Bucket buckets[NBUCKET];
+    size_t idx = 0;
 
-  // current minute marker
-  uint64_t cur_minute = 0;
+    // current minute marker
+    uint64_t cur_minute = 0;
 
-  // active state tracking (start times as seconds since steady epoch)
-  bool frn_tx_active = false;
-  bool frn_rx_active = false;
-  bool rf_tx_active = false;
-  bool rf_rx_active = false;
-  bool sql_active = false;
-  double frn_tx_t0 = 0.0;
-  double frn_rx_t0 = 0.0;
-  double rf_tx_t0 = 0.0;
-  double rf_rx_t0 = 0.0;
-  double sql_t0 = 0.0;
+    // active state tracking (start times as seconds since steady epoch)
+    bool frn_tx_active = false;
+    bool frn_rx_active = false;
+    bool rf_tx_active = false;
+    bool rf_rx_active = false;
+    bool sql_active = false;
+    double frn_tx_t0 = 0.0;
+    double frn_rx_t0 = 0.0;
+    double rf_tx_t0 = 0.0;
+    double rf_rx_t0 = 0.0;
+    double sql_t0 = 0.0;
 
-  // totals since boot
-  DurAgg frn_tx_total;
-  DurAgg frn_rx_total;
-  DurAgg rf_tx_total;
-  DurAgg rf_rx_total;
-  DurAgg sql_total;
-  uint64_t frn_tx_bytes_total = 0;
-  uint64_t frn_rx_bytes_total = 0;
-  uint64_t frn_link_up_total = 0;
-  uint64_t frn_link_down_total = 0;
-  CmdAgg cmd_total;
+    // totals since boot
+    DurAgg frn_tx_total;
+    DurAgg frn_rx_total;
+    DurAgg rf_tx_total;
+    DurAgg rf_rx_total;
+    DurAgg sql_total;
+    uint64_t frn_tx_bytes_total = 0;
+    uint64_t frn_rx_bytes_total = 0;
+    uint64_t frn_link_up_total = 0;
+    uint64_t frn_link_down_total = 0;
+    CmdAgg cmd_total;
 
-  // FRN users
-  uint64_t frn_users_cur = 0;
-  uint64_t frn_users_peak_1h = 0;
-  std::unordered_map<std::string, uint64_t> user_last_seen_minute; // for unique_1h
-  std::unordered_map<std::string, bool> user_present;             // current set
+    // FRN users
+    uint64_t frn_users_cur = 0;
+    uint64_t frn_users_peak_1h = 0;
+    std::unordered_map<std::string, uint64_t> user_last_seen_minute; // for unique_1h
+    std::unordered_map<std::string, bool> user_present;             // current set
+
+    // FRN activity timestamps (monotonic seconds). 0 means "unknown".
+    double last_frn_rx_monotonic = 0.0;
+    double last_frn_tx_monotonic = 0.0;
+    double last_frn_link_up_monotonic = 0.0;
+    double last_frn_link_down_monotonic = 0.0;
+
+  };
+  std::map<std::string, LogicStats> logic_states;
+  std::vector<std::string> logic_order;
+  std::string primary_logic;
+  std::string registry_error = "none";
+  LogicStats legacy_totals;
+  bool legacy_totals_available = false;
+  LogicStats* findLogic(const std::string& name);
+  void rotateBuckets(LogicStats& ls, uint64_t now_minute);
+  std::string formatNodeStatsLine(double now_s) const;
+  std::string formatLogicMetrics(LogicStats& ls, double now_s);
+  std::string formatLogicTotals(const LogicStats& ls) const;
 
   // timer
   Async::Timer* tick_timer = nullptr;
@@ -311,6 +350,7 @@ private:
   std::string history_path;
   bool log_to_stdout = true;
   bool started = false;
+  bool initial_report_pending = true;
   std::thread stats_writer;
   std::mutex stats_writer_mutex;
   std::condition_variable stats_writer_ready;
@@ -337,12 +377,6 @@ private:
   bool last_aiors_attempt_ok = false;
   std::string last_aiors_error = "not_started";
   std::string linux_boot_id = "unknown";
-
-  // FRN activity timestamps (monotonic seconds). 0 means "unknown".
-  double last_frn_rx_monotonic = 0.0;
-  double last_frn_tx_monotonic = 0.0;
-  double last_frn_link_up_monotonic = 0.0;
-  double last_frn_link_down_monotonic = 0.0;
 
   // time base
   double start_monotonic = 0.0;

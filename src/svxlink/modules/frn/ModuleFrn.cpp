@@ -272,6 +272,7 @@ bool ModuleFrn::initialize(void)
     return false;
   }
 
+  SvxStats::instance().setFrnEnabled(logicName(), true);
   return true;
   
 } /* initialize */
@@ -533,7 +534,7 @@ void ModuleFrn::onFrnClientListReceived(const FrnList& list)
   std::vector<std::string> v;
   v.reserve(list.size());
   for (const auto& s : list) v.push_back(s);
-  SvxStats::instance().onFrnClientListUpdate(v);
+  SvxStats::instance().onFrnClientListUpdate(logicName(), v);
 }
 
 static inline bool isFrnLinkUpState(QsoFrn::State st)
@@ -547,11 +548,11 @@ void ModuleFrn::onQsoStateChange(QsoFrn::State st)
   const bool is_link_up = isFrnLinkUpState(st);
   if (is_link_up && !was_link_up)
   {
-    SvxStats::instance().onFrnLinkUp();
+    SvxStats::instance().onFrnLinkUp(logicName());
   }
   else if (!is_link_up && was_link_up)
   {
-    SvxStats::instance().onFrnLinkDown();
+    SvxStats::instance().onFrnLinkDown(logicName());
   }
   last_qso_state = st;
 
@@ -559,18 +560,18 @@ void ModuleFrn::onQsoStateChange(QsoFrn::State st)
   const bool is_tx = qso->isTransmitting();
   const bool is_rx = (st == QsoFrn::STATE_RX_AUDIO);
 
-  SvxStats::instance().onFrnTxState(is_tx);
-  SvxStats::instance().onFrnRxState(is_rx);
+  SvxStats::instance().onFrnTxState(logicName(), is_tx);
+  SvxStats::instance().onFrnRxState(logicName(), is_rx);
 }
 
 void ModuleFrn::onFrnTxBytes(uint64_t bytes)
 {
-  SvxStats::instance().addFrnTxBytes(bytes);
+  SvxStats::instance().addFrnTxBytes(logicName(), bytes);
 }
 
 void ModuleFrn::onFrnRxBytes(uint64_t bytes)
 {
-  SvxStats::instance().addFrnRxBytes(bytes);
+  SvxStats::instance().addFrnRxBytes(logicName(), bytes);
 }
 
 static inline std::string trim_copy(const std::string& s)
@@ -594,7 +595,10 @@ static inline const std::vector<std::string>& supportedRunCmds()
 {
   static const std::vector<std::string> cmds =
   {
-    "get stats",
+    "get diagnostics",
+    "get diagnostics node",
+    "get diagnostics logic",
+    "get diagnostics all",
     "get version",
     "get psu a",
     "get psu b",
@@ -613,7 +617,14 @@ static inline const std::vector<std::string>& supportedRunCmds()
 static inline bool isSupportedRunCmd(const std::string& cmd)
 {
   const auto& cmds = supportedRunCmds();
-  return std::find(cmds.begin(), cmds.end(), cmd) != cmds.end();
+  if(std::find(cmds.begin(), cmds.end(), cmd) != cmds.end()) return true;
+  const std::string prefix = "get diagnostics logic ";
+  if(cmd.rfind(prefix, 0) != 0 || cmd.size() <= prefix.size()) return false;
+  // Named queries are handled internally, never passed to a shell/aiorsctl.
+  const std::string name = cmd.substr(prefix.size());
+  return std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+    return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.';
+  });
 }
 
 static inline std::string runCmdHelpLine()
@@ -622,6 +633,7 @@ static inline std::string runCmdHelpLine()
   std::ostringstream oss;
   oss << "Supported commands:";
   for (const auto& c : cmds) oss << " " << c << ";";
+  oss << " get diagnostics logic <configured-name>;";
   return oss.str();
 }
 
@@ -661,7 +673,12 @@ bool ModuleFrn::parseAndAuthorizeCmd(const std::string& from_id,
     }
   }
 
-  rest = tolower_copy(trim_copy(rest));
+  rest = trim_copy(rest);
+  const std::string named_prefix = "get diagnostics logic ";
+  if(tolower_copy(rest).rfind(named_prefix, 0) == 0)
+    rest = named_prefix + trim_copy(rest.substr(named_prefix.size()));
+  else
+    rest = tolower_copy(rest);
   if (rest.empty())
   {
     out_err = "CmdReply: ERR: empty command";
@@ -704,7 +721,10 @@ void ModuleFrn::sendCmdReplyChunked(const std::string& to_id,
           s.end());
 
   const std::string base_prefix = "CmdReply: ";
-  const std::string part_prefix_example = "CmdReply: [99/99] ";
+  // The number of chunks cannot exceed the character count. Reserve enough
+  // digits for that bound, including diagnostic reports with over 99 parts.
+  const std::string bound = std::to_string(s.size());
+  const std::string part_prefix_example = "CmdReply: [" + bound + "/" + bound + "] ";
   const size_t reserve = part_prefix_example.size();
 
   // If it fits in one TM, keep it simple (no numbering)
@@ -769,7 +789,7 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
     std::string m = trim_copy(msg);
     std::cout << "FRN RunCmd IGNORED (broadcast) from " << from_id
               << ": " << m << std::endl;
-    SvxStats::instance().onCmdBroadcastAttempt();
+    SvxStats::instance().onCmdBroadcastAttempt(logicName());
     return;
   }
 
@@ -778,8 +798,8 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
     // RunCmd but rejected/unauthorized/invalid (no executable cmd)
     std::cout << "FRN RunCmd REJECTED from " << from_id << ": (" << err << ")"
               << std::endl;
-    if (err.find("AUTH") != std::string::npos) SvxStats::instance().onCmdAuthFailed();
-    else SvxStats::instance().onCmdRejected();
+    if (tolower_copy(err).find("auth") != std::string::npos) SvxStats::instance().onCmdAuthFailed(logicName());
+    else SvxStats::instance().onCmdRejected(logicName());
     // err already includes "CmdReply: ..." prefix for user-visible error
     qso->sendTextMessage(from_id, err);
     return;
@@ -794,59 +814,40 @@ void ModuleFrn::onTextMessageReceived(const std::string& from_id,
   // Internal command (no aiorsctl): help
   if (cmd == "help")
   {
-    SvxStats::instance().onCmdAccepted();
+    SvxStats::instance().onCmdAccepted(logicName());
     sendCmdReplyChunked(from_id, runCmdHelpLine());
     return;
   }
 
-if (cmd == "get stats")
-{
-  SvxStats::instance().onCmdAccepted();
-
-  std::vector<std::string> groups = SvxStats::instance().formatStatsGroups();
-  if (groups.empty())
-    groups.push_back("STATS (empty)");
-
-  // Numbered replies: CmdReply: [i/N] ...
-  const size_t n = groups.size();
-  const std::string base_prefix = "CmdReply: ";
-  for (size_t i = 0; i < n; ++i)
+  if(cmd == "get diagnostics" || cmd.rfind("get diagnostics ", 0) == 0)
   {
-    std::ostringstream pfx;
-    pfx << base_prefix << "[" << (i+1) << "/" << n << "] ";
-
-    std::string line = groups[i];
-    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
-    line.erase(std::remove(line.begin(), line.end(), '\n'), line.end());
-
-    // Hard clamp to FRN_TM_MAX_CHARS
-    if (pfx.str().size() < FRN_TM_MAX_CHARS)
-    {
-      const size_t max_payload = FRN_TM_MAX_CHARS - pfx.str().size();
-      if (line.size() > max_payload && max_payload >= 3)
-      {
-        line.resize(max_payload - 3);
-        line += "...";
-      }
-      else if (line.size() > max_payload)
-      {
-        line.resize(max_payload);
-      }
+    std::string scope = "logic", selected = logicName();
+    if(cmd == "get diagnostics node") scope = "node";
+    else if(cmd == "get diagnostics all") scope = "all";
+    else if(cmd.rfind("get diagnostics logic ", 0) == 0)
+      selected = cmd.substr(std::string("get diagnostics logic ").size());
+    auto groups = SvxStats::instance().formatDiagnosticGroups(scope, selected);
+    if(groups.empty()) {
+      SvxStats::instance().onCmdRejected(logicName());
+      sendCmdReplyChunked(from_id, "ERR: unknown configured logic " + selected);
+      return;
     }
-    else
-    {
-      line.clear();
+    SvxStats::instance().onCmdAccepted(logicName());
+    groups = SvxStats::instance().formatDiagnosticGroups(scope, selected);
+    if(cmd == "get diagnostics") {
+      auto node = SvxStats::instance().formatDiagnosticGroups("node");
+      groups.insert(groups.begin(), node.begin(), node.end());
     }
-
-    qso->sendTextMessage(from_id, pfx.str() + line);
+    std::ostringstream reply;
+    for(const auto& group : groups) reply << group << "\n";
+    sendCmdReplyChunked(from_id, reply.str());
+    return;
   }
-  return;
-}
 
   if (cmd_busy)
   {
     std::cout << "FRN RunCmd BUSY from " << from_id << ": " << cmd << std::endl;
-    SvxStats::instance().onCmdRejected();
+    SvxStats::instance().onCmdRejected(logicName());
     qso->sendTextMessage(from_id, "CmdReply: ERR: busy");
     return;
   }
@@ -857,7 +858,7 @@ if (cmd == "get stats")
   cmd_stderr.clear();
 
   std::cout << "FRN RunCmd ACCEPTED from " << from_id << ": " << cmd << std::endl;
-  SvxStats::instance().onCmdAccepted();
+  SvxStats::instance().onCmdAccepted(logicName());
   cmd_start_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now().time_since_epoch()).count();
 
@@ -911,7 +912,7 @@ if (cmd == "get stats")
         uint64_t end_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now().time_since_epoch()).count();
         if (end_ms >= cmd_start_ms)
-          SvxStats::instance().onCmdExecTimeMs((uint32_t)(end_ms - cmd_start_ms));
+          SvxStats::instance().onCmdExecTimeMs(logicName(), (uint32_t)(end_ms - cmd_start_ms));
 
         delete cmd_exec;
         cmd_exec = 0;

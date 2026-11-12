@@ -1,334 +1,191 @@
-# AIORS FRN RunCmd Diagnostics Report
+# AIORS FRN RunCmd Diagnostics Manual
 
-Originally generated from the local SvxLink and AIORS workspaces on 2026-08-23.
-Software identity reporting and LED integration notes updated on 2026-10-20.
-Four-radio diagnostics and FRN status commands updated on 2026-10-30.
+Updated 12 November 2026. Supports one or two named Simplex/Repeater logic instances.
+This revision changes the FRN diagnostic command syntax. `get stats` is no longer accepted.
 
-## Summary
+## Diagnostic ownership
 
-The FRN messages module implements a private text-message command bridge named `RunCmd`. Incoming FRN text messages are parsed by `QsoFrn`, emitted to `ModuleFrn`, validated against a small allowlist, and then answered with FRN private text messages prefixed with `CmdReply:`.
+One SvxLink process owns one shared AIORS sampler and one statistics block per configured logic.
+Logic section names identify their statistics; names are not tied to a particular logic type or radio port.
+Reordering `[GLOBAL] LOGICS` does not exchange persisted counters. A third logic is outside the supported diagnostics configuration and produces an explicit error.
 
-The following RunCmd commands are allowlisted:
+| Shared node/hardware | Per logic |
+|---|---|
+| Linux boot ID and uptime; SvxLink process uptime/version/revision | RF RX/TX, squelch, events, durations and duty |
+| aiorsd uptime/version/revision, hardware version, shared hardware sample age/error | FRN link transitions, users, joins/leaves, traffic and bytes |
+| PSU A/B, energy, environment, ADC, fan and digital inputs | FRN RunCmd accepted/rejected/auth-failed/broadcast counters and execution times |
+| Physical AI/BI/AE/BE radio health and CM108 A/B sound-card health | Logic type, callsign, RX/TX configuration names, readiness, FRN availability and counter epoch |
 
-| RunCmd command | Implemented behavior | Data source |
-| --- | --- | --- |
-| `help` | Internal reply listing the supported commands. | `ModuleFrn.cpp` allowlist |
-| `get stats` | Internal SvxLink diagnostics report, split into numbered FRN text replies. | `SvxStats` counters |
-| `get version` | Reports the embedded SvxLink version and the version returned by `aiorsctl version`. | SvxLink build metadata and AIORS controller |
-| `get psu a` | Runs external `aiorsctl get psu a`. | AIORS controller via `aiorsctl` |
-| `get psu b` | Runs external `aiorsctl get psu b`. | AIORS controller via `aiorsctl` |
-| `get psu all` | Runs external `aiorsctl get psu all`. | AIORS controller via `aiorsctl` |
-| `get temp all` | Runs external `aiorsctl get temp all`. | AIORS controller via `aiorsctl` |
-| `get radio status ai` / `bi` / `ae` / `be` | Reports one physical radio's type, lifecycle state, and management status. | AIORS controller via `aiorsctl` |
-| `get radio status all` | Reports all four physical radio ports. | AIORS controller via `aiorsctl` |
+The MQTT agent is a separate node-wide service. Its version and uptime are added to MQTT telemetry;
+FRN reports contain the Linux, SvxLink and aiorsd information available to SvxStats.
 
-The AIORS Tcl integration in `events.d/local/aiors.tcl` does not directly generate the `get stats` diagnostic reply. It wraps SvxLink RX/TX Tcl event procedures and queues LED states through the native `aiorsSetLed` command. Version, PSU, and temperature RunCmd commands use the external AIORS control entry point, `aiorsctl`.
+## Private message syntax and authorization
 
-## FRN Message Flow
-
-1. `QsoFrn::handleCommand` sees an FRN `DT_TEXT_MESSAGE` response and switches to list receive mode.
-2. `QsoFrn::handleList` parses received text messages in either triple-list form (`from_id`, `message`, `scope`) or XML form (`<ID>...</ID><MS>...</MS>`).
-3. Parsed messages are emitted through `textMessageReceived(from_id, msg, scope)`.
-4. `ModuleFrn::onTextMessageReceived` calls `parseAndAuthorizeCmd`.
-5. Non-RunCmd messages are ignored.
-6. Broadcast RunCmd attempts are ignored and recorded in stats.
-7. Private RunCmd messages are either rejected with `CmdReply: ERR: ...`, handled internally, or forwarded to `aiorsctl`.
-8. Replies are sent back through `QsoFrn::sendTextMessage`, which formats a private FRN `TM:<ID>...</ID><MS>...</MS>` frame.
-
-## RunCmd Syntax and Authorization
-
-RunCmd messages are recognized case-insensitively by the `RunCmd:` prefix.
-
-When `[ModuleFrn] RUN_CMD_SECRET` is empty, the accepted form is:
+Send a private FRN text message to the node:
 
 ```text
 RunCmd: <command>
 ```
 
-When `[ModuleFrn] RUN_CMD_SECRET` is set, the accepted forms are:
+If the receiving module has `RUN_CMD_SECRET` configured:
 
 ```text
 RunCmd:<SECRET>: <command>
 RunCmd:<SECRET> <command>
 ```
 
-After optional secret handling, the command text is trimmed, converted to lower case, and checked against the allowlist in `supportedRunCmds()`.
+The `RunCmd:` prefix and command keywords are case-insensitive. Secrets are case-sensitive.
+Named logic arguments retain their case and must match the configured section name exactly.
+Explicit named queries accept letters, digits, underscores, periods and hyphens. Other section
+names remain visible in the all-logic report and through their own module's default query.
+Broadcast command attempts are counted under the receiving logic and ignored without a reply.
+Non-RunCmd text is ignored. This allowlist does not permit arbitrary shell commands or hardware writes.
 
-Important guardrails:
+## Commands
 
-- Only private/direct FRN messages are executed (`scope == "P"`).
-- Broadcast RunCmd messages are logged, counted as broadcast attempts, and not replied to.
-- Unknown commands return `CmdReply: ERR: command not allowed`.
-- Empty commands return `CmdReply: ERR: empty command`.
-- Auth failures return `CmdReply: ERR: auth failed`.
-- Only one external `aiorsctl` command is allowed at a time; concurrent external requests receive `CmdReply: ERR: busy`.
-- External command execution has a 3 second timeout.
-
-## Implemented Commands
-
-### `help`
-
-`help` is handled internally by `ModuleFrn`. It returns the current command allowlist:
-
-```text
-Supported commands: get stats; get version; get psu a; get psu b; get psu all; get temp all; help;
-```
-
-The reply is sent through `sendCmdReplyChunked`, so it is prefixed with `CmdReply:` and chunked if it ever grows beyond the FRN text message size limit.
-
-### `get stats`
-
-`get stats` is handled internally. It does not call `aiorsctl`.
-
-The command calls:
-
-```cpp
-SvxStats::instance().formatStatsGroups()
-```
-
-The resulting groups are sent as numbered private replies:
-
-```text
-CmdReply: [1/N] STATS ...
-CmdReply: [2/N] FRN TX ...
-CmdReply: [3/N] FRN RX ...
-CmdReply: [4/N] RF TX ...
-CmdReply: [5/N] RF RX ...
-CmdReply: [6/N] CMD ...
-```
-
-Each `get stats` reply is clamped to the FRN text limit of 240 characters.
-
-The current stats groups are:
-
-| Stats group | Fields included |
-| --- | --- |
-| `STATS` | uptime, current FRN users, peak users in the last hour, unique users in the last hour, FRN link up/down events, FRN RX/TX ages, joins/leaves |
-| `FRN TX 1h` | event count, total seconds, min/max seconds, duty percentage, transmitted FRN bytes |
-| `FRN RX 1h` | event count, total seconds, min/max seconds, duty percentage, received FRN bytes |
-| `RF TX 1h` | event count, total seconds, min/max seconds, duty percentage, total RF TX hours |
-| `RF RX 1h` | event count, total seconds, min/max seconds, duty percentage, total RF RX hours |
-| `CMD 1h` | accepted commands, rejected commands, auth failures, broadcast attempts, average command execution time, max command execution time |
-
-FRN link transitions call `SvxStats::onFrnLinkUp()` and `SvxStats::onFrnLinkDown()`, so the corresponding rolling and lifetime counters are active.
-
-### `get version`
-
-`get version` combines the version compiled into SvxLink with the output of:
-
-```text
-<AIORSCTL_PATH> version
-```
-
-The FRN response is a single readable line when it fits within the protocol limit:
-
-```text
-CmdReply: svxlink 1.9.99.36@25.05.1-97-g1c60ffaf-dirty; aiorsd 4f165e5-dirty (hw 1.0)
-```
-
-AIORS now reports only its build-time Git description and hardware revision;
-the manually maintained software release number has been removed. A Git
-description can be a short commit hash or a tag-based description. `-dirty`
-indicates uncommitted build changes. `unknown` means the Git identity was not
-available at build time. Treat the description as an opaque string. Hardware
-`1.0`/`1.1` and SvxLink's own version format are unchanged.
-
-The bridge forwards the daemon's text without requiring a dotted software
-release number. It uses `aiorsctl version`, which queries the running daemon;
-`aiorsctl --version` would identify the control binary instead. After installing
-a new daemon binary, restart `aiorsd` to run that build.
-
-The periodic full `STATS` record and MQTT snapshot contain these identity fields:
-
-| Fields | Meaning |
+| Command | Scope and result |
 |---|---|
-| `aiors_software_version`, `aiors_software_revision` | Both contain the AIORS daemon's Git description |
-| `aiors_hardware_version` | Board revision, `1.0` or `1.1` |
-| `svxlink_software_version`, `svxlink_software_revision` | SvxLink's own version and revision, in their existing formats |
+| `help` | Current command list and named-logic query syntax |
+| `get diagnostics` | Shared node/hardware data plus the logic receiving this private FRN message |
+| `get diagnostics node` | Shared process and AIORS hardware data only |
+| `get diagnostics logic` | The receiving logic only |
+| `get diagnostics logic RepeaterLogic2` | That exact configured logic, regardless of which module received the request |
+| `get diagnostics all` | Shared data once, followed by each configured logic |
+| `get version` | Live version information from `aiorsctl get version` |
+| `get psu a`, `get psu b`, `get psu all` | Live physical PSU measurements from aiorsd |
+| `get temp all` | Live temperature/humidity from aiorsd |
+| `get radio status ai`, `bi`, `ae`, `be`, `all` | Live physical radio lifecycle state from aiorsd |
 
-The compact FRN `get stats` groups described above do not include this complete
-identity snapshot. Use `get version` for the daemon identity over FRN.
-MQTT status reports the independent agent's Git description in both
-`agent_version` and `agent_revision`; that revision may differ from the daemon.
-MQTT identity values remain JSON strings, even for numeric-looking hashes.
-AIORS diagnostics schema `4`, SvxLink snapshot schema `3`, and MQTT envelope
-schema `1` remain unchanged.
-
-### `get psu a`
-
-`get psu a` is forwarded as:
+Examples:
 
 ```text
-<AIORSCTL_PATH> get psu a
+RunCmd: get diagnostics node
+RunCmd: get diagnostics logic
+RunCmd: get diagnostics logic LocalSimplex
+RunCmd: get diagnostics all
 ```
 
-With the default configuration this becomes:
+The old `RunCmd: get stats` request returns `CmdReply: ERR: command not allowed`.
+An unknown named logic returns an explicit error; it never selects another logic implicitly.
+Hardware queries identify physical channels or ports. `RepeaterLogic2` does not mean hardware channel B.
+
+## Replies
+
+Replies use `CmdReply:` and are numbered when multiple FRN messages are needed.
+Each private message is bounded by the 240-character FRN text limit. Long diagnostic reports
+are split across messages rather than truncating the remaining fields. Reassemble numbered
+parts in order; a key/value token may cross a message boundary.
+
+Shared groups start with:
 
 ```text
-/usr/local/bin/aiorsctl get psu a
+DIAGNOSTICS scope=node ...
 ```
 
-The reply is taken from stdout, or stderr if stdout is empty, or `OK` if both streams are empty.
-
-### `get psu b`
-
-`get psu b` is forwarded as:
+Logic groups identify the section name:
 
 ```text
-<AIORSCTL_PATH> get psu b
+DIAGNOSTICS scope=logic logic=RepeaterLogic type=Repeater state=ready ...
 ```
 
-It uses the same stdout/stderr/`OK` reply behavior as `get psu a`.
+Logic names and metadata that contain characters unsuitable for flat key/value tokens use
+percent encoding. For example, a period is represented as `%2E`. MQTT decodes these names
+back to their original JSON object keys.
 
-### `get psu all`
+Configured but failed logics remain in the report with `state=failed`; their live measurements
+are `na`, not falsely reported as idle/zero. When a logic has no loaded FRN module,
+`frn_enabled=0` and its FRN/FRN-command fields are `na`. An unused second slot is omitted.
 
-`get psu all` is forwarded as:
+## Measurements and freshness
 
-```text
-<AIORSCTL_PATH> get psu all
-```
+Shared `aiors_*` measurements come from the single cached hardware sample. Inspect
+`aiors_sample_ts_unix_s`, `aiors_sample_age_s`, `aiors_sample_ok` and `aiors_sample_error`.
+`get diagnostics node` does not issue another UART/ADC sampling request. The direct PSU,
+temperature and radio commands above query aiorsd on demand.
 
-It is expected to return the AIORS power-supply diagnostics for all supported PSU channels.
+Per-logic RF and FRN state is updated by the receiving logic's own callbacks. RF RX/TX and
+squelch windows, durations, event counts, FRN lists/peaks/uniques, link ages, byte totals and
+command statistics are independent. Simultaneous activity on two logics must not clear the
+other logic's flags. The rolling window uses 60 one-minute buckets; windows start fresh when
+SvxLink restarts. Lifetime counters are restored by logic name.
 
-### `get temp all`
+Representative families:
 
-`get temp all` is forwarded as:
-
-```text
-<AIORSCTL_PATH> get temp all
-```
-
-It is expected to return all temperature diagnostics exposed by the AIORS controller.
-
-## How Diagnostics Are Pulled
-
-### SvxLink/FRN stats diagnostics
-
-The `get stats` command is served from `SvxStats`, a C++ singleton that aggregates runtime state.
-
-The data path is:
-
-| Diagnostic source | How it enters `SvxStats` |
-| --- | --- |
-| FRN client list | `QsoFrn` emits `frnClientListReceived`; `ModuleFrn::onFrnClientListReceived` converts the list to strings and calls `SvxStats::onFrnClientListUpdate`. |
-| FRN TX/RX activity | `QsoFrn` emits `stateChange`; `ModuleFrn::onQsoStateChange` maps FRN TX audio states to TX-active and `STATE_RX_AUDIO` to RX-active. |
-| FRN byte counts | `QsoFrn` emits `frnTxBytes` and `frnRxBytes`; `ModuleFrn` forwards those byte counts into `SvxStats`. |
-| RF squelch/RX | `Logic::squelchOpen` calls `SvxStats::onSquelchState` and `SvxStats::onRfRxState`. |
-| RF TX | `Logic::transmitterStateChange` calls `SvxStats::onRfTxState`. |
-| RunCmd command metrics | `ModuleFrn::onTextMessageReceived` increments accepted, rejected, auth-failure, broadcast-attempt, and execution-time counters. |
-| Periodic stats logging | `svxlink.cpp` starts `SvxStats` using `[GLOBAL] STATS_INTERVAL` and persists totals using `[GLOBAL] STATS_PERSIST_PATH`. |
-
-### Four physical radios
-
-With AIORS diagnostics collection enabled, `get stats` adds a compact `RADIOS`
-reply, for example:
-
-```text
-RADIOS ai=ready bi=ready ae=disabled be=unimplemented sample_ok=1 age=12s
-```
-
-These are physical AI/BI/AE/BE states, independent of audio/PTT/COS routing.
-`sample_ok` and `age` describe freshness; states come from the last successful
-sample. Diagnostics version 4 remains supported but cannot establish physical
-port identity, so these states are `na`. Version 5 requires all four states.
-
-For a live status request, use `RunCmd: get radio status all` (with the existing
-secret syntax if configured). It returns type, state, and whether a driver
-manages each port. This requires the updated AIORS daemon. The same command can
-target `ai`, `bi`, `ae`, or `be`; arbitrary commands remain rejected.
-
-Periodic snapshots include `aiors_radio_<port>_status` and separate per-port
-fault events, samples, and duration for 1h, 24h, and lifetime totals. Disabled
-ports and external driver placeholders (`unimplemented`) accumulate no faults.
-The legacy A/B metrics remain available; with version 5 they refer to AI/BI
-and use `na` while disabled or unimplemented. Existing historical counters are
-preserved; new physical-port lifetime counters start separately.
-
-### AIORS hardware diagnostics
-
-The hardware-facing diagnostics are pulled by executing the external AIORS control program:
-
-```text
-aiorsctl get psu a
-aiorsctl get psu b
-aiorsctl get psu all
-aiorsctl get temp all
-```
-
-`ModuleFrn` does not parse AIORS hardware readings itself. It captures stdout/stderr from `aiorsctl`, sanitizes/chunks the text reply, and sends it back to the requesting FRN client.
-
-The original August report covered the SvxLink call path. The October identity
-update also checked the AIORS CLI formatter, SvxLink diagnostics parser, MQTT
-conversion and FRN reply formatter using ARM64 test programs. It did not test
-a live broker, FRN connection, or physical sensor accuracy.
-
-### AIORS Tcl integration
-
-`events.d/local/aiors.tcl` integrates SvxLink logic events with AIORS hardware control:
-
-- It maps RX/TX IDs to AIORS channel `a` or `b`.
-- It wraps SvxLink `transmit` Tcl procedures and calls `aiorsSetLed <channel> tx on|off`.
-- It wraps SvxLink `squelch_open` Tcl procedures and calls `aiorsSetLed <channel> rx on|off`.
-- It is idempotent, so re-sourcing the file should not double-wrap the same procedures.
-
-The native command updates four desired LED states in memory. A shared worker
-performs AIORS command/reply file I/O, acknowledgement checking, retries and
-periodic refresh outside the SvxLink audio event loop. See
-`docs/AIORS_LED_COMMUNICATION.md` for the protocol, timeouts and recovery behavior.
-
-The C++ `Logic` class emits compatible Tcl events:
-
-```text
-squelch_open <rx_id> <0|1>
-transmit <tx_id> <0|1>
-```
-
-That is how the Tcl AIORS code learns about live RX/TX state. Separately, the FRN RunCmd bridge uses `aiorsctl get ...` to query AIORS diagnostics on demand.
+| Family | Meaning |
+|---|---|
+| `rf_tx_*`, `rf_rx_*` | RF activity, hourly events/durations/duty and persistent totals |
+| `sql_*`, `sq_*` | Squelch activity, hourly events/duration and persisted open time/events |
+| `frn_tx_*`, `frn_rx_*` | Per-logic FRN activity, ages, durations and bytes |
+| `frn_link_*` | Per-logic link state, transition ages/events and lifetime totals |
+| `frn_users*`, `frn_user_join_1h`, `frn_user_leave_1h` | This logic's observed FRN user list and window counters |
+| `cmd_*` | Commands received through this logic, even if a query requests another logic |
+| `counter_epoch_unix_s` | Starting baseline of that logic's persistent counters |
 
 ## Configuration
 
-The RunCmd bridge is configured in `[ModuleFrn]`.
+Logic names may be chosen freely; their TYPE controls behavior:
 
 ```ini
-# Path to aiorsctl. If not set, defaults to /usr/local/bin/aiorsctl
-AIORSCTL_PATH=/usr/local/bin/aiorsctl
+[GLOBAL]
+LOGICS=LocalRepeater,LocalSimplex
+STATS_PRIMARY_LOGIC=LocalRepeater
+STATS_INTERVAL=600
+STATS_AIORS_SAMPLE_INTERVAL=30
 
-# Optional shared secret. If set, RunCmd messages must include it.
+[LocalRepeater]
+TYPE=Repeater
+RX=Rx1
+TX=Tx2
+MODULES=ModuleFrn
+
+[LocalSimplex]
+TYPE=Simplex
+RX=Rx2
+TX=Tx1
+
+[ModuleFrn]
+AIORSCTL_PATH=/usr/local/bin/aiorsctl
 RUN_CMD_SECRET=
 ```
 
-The relevant defaults are:
+This is a fragment: retain the normal callsign, audio, PTT/COS and module settings needed by
+your installation. One Simplex plus one Repeater, two Simplex, or two Repeater instances are
+supported. `STATS_PRIMARY_LOGIC` selects only the temporary legacy MQTT metric aliases;
+the first LOGICS entry is the default if it is omitted. It does not change radio routing.
 
-- `AIORSCTL_PATH` defaults to `/usr/local/bin/aiorsctl`.
-- `RUN_CMD_SECRET` defaults to empty.
-- FRN text replies are limited to 240 characters per private message.
-- External RunCmd execution timeout is 3 seconds.
+For two logics, set the existing node identity explicitly in `/etc/aiors-mqtt/agent.conf`:
 
-## Source References
+```ini
+[agent]
+ENABLED=1
+NODE_ID=327CRMCE0
+```
 
-The line numbers below are historical anchors from the original report;
-search for the named functions in current source. The current LED worker is
-`src/svxlink/svxlink/AiorsLedClient.cpp`, registered through `EventHandler.cpp`.
+The node identity remains shared; no second broker account or MQTT service is required.
+
+## History and upgrades
+
+The statistics snapshot is schema 4. AIORS hardware input remains diagnostics schema 5.
+Persistent totals use schema 2 with `logic.<encoded-section-name>.<metric>` entries.
+Shared AIORS energy/fault totals retain their existing keys and continue once per node.
+Old mixed RF/FRN/command totals are preserved under `legacy.*`; they are not copied into
+either new logic. `legacy_logic_totals_available=1` identifies that archive. Per-logic counters
+start with their own epoch. A renamed section starts a new identity; reordering does not.
+
+MQTT keeps its existing node topics and envelope schema 1, adding a `logics` object and
+explicit event scopes. See the deployment MQTT manual for JSON types, server ingestion,
+offline queues and the temporary primary-logic aliases.
+
+## Source and validation
 
 | Area | Source |
-| --- | --- |
-| RunCmd configuration load | `src/svxlink/modules/frn/ModuleFrn.cpp:216` |
-| FRN text message callback hookup | `src/svxlink/modules/frn/ModuleFrn.cpp:228` |
-| RunCmd allowlist | `src/svxlink/modules/frn/ModuleFrn.cpp:574` |
-| RunCmd parsing and authorization | `src/svxlink/modules/frn/ModuleFrn.cpp:604` |
-| Reply chunking | `src/svxlink/modules/frn/ModuleFrn.cpp:657` |
-| RunCmd handling | `src/svxlink/modules/frn/ModuleFrn.cpp:716` |
-| `get stats` handling | `src/svxlink/modules/frn/ModuleFrn.cpp:766` |
-| External `aiorsctl` execution | `src/svxlink/modules/frn/ModuleFrn.cpp:828` |
-| FRN private text send | `src/svxlink/modules/frn/QsoFrn.cpp:846` |
-| FRN received text parsing | `src/svxlink/modules/frn/QsoFrn.cpp:1138` |
-| `SvxStats` public API | `src/svxlink/svxlink/SvxStats.h:38` |
-| Stats group formatting | `src/svxlink/svxlink/SvxStats.cpp:470` |
-| Core RF squelch stats source | `src/svxlink/svxlink/Logic.cpp:1075` |
-| Core RF TX stats source | `src/svxlink/svxlink/Logic.cpp:1133` |
-| Stats startup/persistence | `src/svxlink/svxlink/svxlink.cpp:449` |
-| Native LED queue dispatch | `events.d/local/aiors.tcl`: `::AIORS::_led_queue` |
-| AIORS RX LED command | `events.d/local/aiors.tcl`: `::AIORS::led_rx` |
-| AIORS TX LED command | `events.d/local/aiors.tcl`: `::AIORS::led_tx` |
-| AIORS TX hook | `events.d/local/aiors.tcl`: `::AIORS::_try_install_tx_hook` |
-| AIORS RX hook | `events.d/local/aiors.tcl`: `::AIORS::_try_install_rx_hook` |
+|---|---|
+| Scoped counters, history, hardware sampler and formatting | `src/svxlink/svxlink/SvxStats.h`, `SvxStats.cpp` |
+| Logic registration and readiness | `src/svxlink/svxlink/svxlink.cpp` |
+| RF/squelch attribution | `src/svxlink/svxlink/Logic.cpp` |
+| FRN attribution, authentication, scopes and replies | `src/svxlink/modules/frn/ModuleFrn.cpp` |
+| Overlap, persistence, reordering and radio tests | `tests/test_svxstats_radios.py` |
+| Actual command parser/authentication tests | `tests/test_frn_diagnostic_commands.py` |
+
+Core statistics serialization remains on the event thread. One background writer handles
+the combined snapshot, history and totals; no second hardware sampler or writer is started.

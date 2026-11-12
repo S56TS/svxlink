@@ -13,6 +13,7 @@ import tempfile
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--single-snapshot", type=Path)
     parser.add_argument("--sanitizers", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -49,6 +50,9 @@ def main():
         command = [str(binary), str(root / "tests/aiors_diagnostics_v5.txt"), str(Path(temp) / "totals")]
         if args.snapshot:
             command.append(str(args.snapshot.resolve()))
+        if args.single_snapshot:
+            if not args.snapshot: parser.error("--single-snapshot requires --snapshot")
+            command.append(str(args.single_snapshot.resolve()))
         subprocess.run(command, check=True)
 
 

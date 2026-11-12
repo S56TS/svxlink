@@ -117,6 +117,44 @@ SvxStats::SvxStats()
     if (boot_id_file.is_open() && std::getline(boot_id_file, boot_id))
       linux_boot_id = stats_token(trim_ascii(boot_id));
   }
+
+}
+
+
+static std::string logic_token(const std::string& value)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char ch : value)
+    if (std::isalnum(ch) || ch == '_' || ch == '-') out += char(ch);
+    else { out += '%'; out += hex[ch >> 4]; out += hex[ch & 15]; }
+  return out.empty() ? "unknown" : out;
+}
+
+static bool decode_logic_token(const std::string& value, std::string& out)
+{
+  out.clear();
+  auto digit = [](char c) -> int {
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+  };
+  for(size_t i=0; i<value.size(); ++i) {
+    unsigned char ch = value[i];
+    if(ch == '%') {
+      if(i+2 >= value.size() || digit(value[i+1]) < 0 || digit(value[i+2]) < 0) return false;
+      ch = (digit(value[i+1]) << 4) | digit(value[i+2]); i += 2;
+    }
+    if(ch < 32 || ch == 127) return false;
+    out += char(ch);
+  }
+  return !out.empty();
+}
+
+SvxStats::LogicStats::LogicStats()
+{
+  counter_epoch_unix_s = unix_now_sec();
   cur_minute = minute_now();
   // initialize buckets
   for (size_t i = 0; i < NBUCKET; ++i)
@@ -124,6 +162,48 @@ SvxStats::SvxStats()
     buckets[i].minute = cur_minute;
   }
   idx = 0;
+}
+
+bool SvxStats::registerLogic(const std::string& name, const std::string& type,
+                            const std::string& callsign, const std::string& rx,
+                            const std::string& tx)
+{
+  if(name.empty() || name.size() > 127 || logic_states.count(name)) {
+    registry_error = "invalid_or_duplicate_logic"; return false;
+  }
+  if(logic_states.size() >= MAX_LOGICS) {
+    registry_error = "more_than_two_logics"; return false;
+  }
+  LogicStats& ls = logic_states[name];
+  ls.name = name; ls.type = type; ls.callsign = callsign; ls.rx = rx; ls.tx = tx;
+  logic_order.push_back(name);
+  if(primary_logic.empty()) primary_logic = name;
+  return true;
+}
+
+SvxStats::LogicStats* SvxStats::findLogic(const std::string& name)
+{
+  const auto it = logic_states.find(name);
+  return it == logic_states.end() ? nullptr : &it->second;
+}
+
+void SvxStats::setLogicState(const std::string& name, const std::string& state)
+{
+  LogicStats* ls = findLogic(name);
+  if(ls) ls->state = state;
+}
+
+void SvxStats::setFrnEnabled(const std::string& name, bool enabled)
+{
+  LogicStats* ls = findLogic(name);
+  if(ls) ls->frn_enabled = enabled;
+}
+
+bool SvxStats::setPrimaryLogic(const std::string& name)
+{
+  if(!findLogic(name)) return false;
+  primary_logic = name;
+  return true;
 }
 
 SvxStats::~SvxStats()
@@ -164,6 +244,8 @@ void SvxStats::start(uint32_t interval_s)
     aiors_timer->setEnable(true);
     collectAiorsDiagnostics();
   }
+  else
+    onTick(nullptr);
 }
 
 
@@ -174,23 +256,23 @@ uint64_t SvxStats::uptimeSeconds() const
   return (uint64_t) std::llround(now - start_monotonic);
 }
 
-void SvxStats::rotateBuckets(uint64_t now_minute)
+void SvxStats::rotateBuckets(LogicStats& ls, uint64_t now_minute)
 {
-  if (now_minute == cur_minute)
+  if (now_minute == ls.cur_minute)
     return;
 
   // Advance minute-by-minute; reset bucket for each new minute
-  while (cur_minute < now_minute)
+  while (ls.cur_minute < now_minute)
   {
-    cur_minute++;
-    idx = (idx + 1) % NBUCKET;
-    buckets[idx] = Bucket{};
-    buckets[idx].minute = cur_minute;
+    ls.cur_minute++;
+    ls.idx = (ls.idx + 1) % NBUCKET;
+    ls.buckets[ls.idx] = Bucket{};
+    ls.buckets[ls.idx].minute = ls.cur_minute;
   }
-  for (auto it = user_last_seen_minute.begin(); it != user_last_seen_minute.end(); )
+  for (auto it = ls.user_last_seen_minute.begin(); it != ls.user_last_seen_minute.end(); )
   {
     if (it->second + NBUCKET <= now_minute)
-      it = user_last_seen_minute.erase(it);
+      it = ls.user_last_seen_minute.erase(it);
     else
       ++it;
   }
@@ -212,12 +294,17 @@ static inline void cmdagg_add_ms(SvxStats::CmdAgg& c, uint32_t ms)
   if (ms > c.max_ms) c.max_ms = ms;
 }
 
-void SvxStats::onFrnClientListUpdate(const std::vector<std::string>& client_list)
+void SvxStats::onFrnClientListUpdate(const std::string& logic_name, const std::vector<std::string>& client_list)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   // Client list updates are received from the FRN server, so treat this as RX activity.
-  last_frn_rx_monotonic = mono_now_sec();
+  ls.last_frn_rx_monotonic = mono_now_sec();
 
   // Build new presence set
   std::unordered_map<std::string, bool> new_present;
@@ -225,207 +312,272 @@ void SvxStats::onFrnClientListUpdate(const std::vector<std::string>& client_list
   for (const auto& s : client_list)
   {
     new_present[s] = true;
-    user_last_seen_minute[s] = m;
+    ls.user_last_seen_minute[s] = m;
   }
 
   // Joins / leaves based on presence diff
   uint64_t joins = 0, leaves = 0;
   for (const auto& kv : new_present)
   {
-    if (user_present.find(kv.first) == user_present.end())
+    if (ls.user_present.find(kv.first) == ls.user_present.end())
       joins++;
   }
-  for (const auto& kv : user_present)
+  for (const auto& kv : ls.user_present)
   {
     if (new_present.find(kv.first) == new_present.end())
       leaves++;
   }
 
-  buckets[idx].user_join += joins;
-  buckets[idx].user_leave += leaves;
+  ls.buckets[ls.idx].user_join += joins;
+  ls.buckets[ls.idx].user_leave += leaves;
 
-  user_present.swap(new_present);
-  frn_users_cur = user_present.size();
+  ls.user_present.swap(new_present);
+  ls.frn_users_cur = ls.user_present.size();
+  ls.buckets[ls.idx].users_peak = std::max(ls.buckets[ls.idx].users_peak, ls.frn_users_cur);
 
   // Peak tracking over last hour: compute fresh on tick (cheap) but also update quickly
   // We'll just update with current and let onTick compute accurate peak.
 }
 
-void SvxStats::onFrnLinkUp()
+void SvxStats::onFrnLinkUp(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+  ls.frn_link_up = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].frn_link_up += 1;
-  frn_link_up_total += 1;
-  last_frn_link_up_monotonic = mono_now_sec();
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].frn_link_up += 1;
+  ls.frn_link_up_total += 1;
+  ls.last_frn_link_up_monotonic = mono_now_sec();
 }
 
-void SvxStats::onFrnLinkDown()
+void SvxStats::onFrnLinkDown(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+  ls.frn_link_up = false;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].frn_link_down += 1;
-  frn_link_down_total += 1;
-  last_frn_link_down_monotonic = mono_now_sec();
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].frn_link_down += 1;
+  ls.frn_link_down_total += 1;
+  ls.last_frn_link_down_monotonic = mono_now_sec();
 }
 
-void SvxStats::onFrnTxState(bool is_tx)
+void SvxStats::onFrnTxState(const std::string& logic_name, bool is_tx)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   double now = mono_now_sec();
 
-  if (is_tx && !frn_tx_active)
+  if (is_tx && !ls.frn_tx_active)
   {
-    frn_tx_active = true;
-    frn_tx_t0 = now;
+    ls.frn_tx_active = true;
+    ls.frn_tx_t0 = now;
   }
-  else if (!is_tx && frn_tx_active)
+  else if (!is_tx && ls.frn_tx_active)
   {
-    frn_tx_active = false;
-    double sec = std::max(0.0, now - frn_tx_t0);
-    duragg_add(buckets[idx].frn_tx, sec);
-    duragg_add(frn_tx_total, sec);
+    ls.frn_tx_active = false;
+    double sec = std::max(0.0, now - ls.frn_tx_t0);
+    duragg_add(ls.buckets[ls.idx].frn_tx, sec);
+    duragg_add(ls.frn_tx_total, sec);
   }
 }
 
-void SvxStats::onFrnRxState(bool is_rx)
+void SvxStats::onFrnRxState(const std::string& logic_name, bool is_rx)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   double now = mono_now_sec();
 
-  if (is_rx && !frn_rx_active)
+  if (is_rx && !ls.frn_rx_active)
   {
-    frn_rx_active = true;
-    frn_rx_t0 = now;
+    ls.frn_rx_active = true;
+    ls.frn_rx_t0 = now;
   }
-  else if (!is_rx && frn_rx_active)
+  else if (!is_rx && ls.frn_rx_active)
   {
-    frn_rx_active = false;
-    double sec = std::max(0.0, now - frn_rx_t0);
-    duragg_add(buckets[idx].frn_rx, sec);
-    duragg_add(frn_rx_total, sec);
+    ls.frn_rx_active = false;
+    double sec = std::max(0.0, now - ls.frn_rx_t0);
+    duragg_add(ls.buckets[ls.idx].frn_rx, sec);
+    duragg_add(ls.frn_rx_total, sec);
   }
 }
 
-void SvxStats::addFrnTxBytes(uint64_t bytes)
+void SvxStats::addFrnTxBytes(const std::string& logic_name, uint64_t bytes)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  last_frn_tx_monotonic = mono_now_sec();
-  buckets[idx].frn_tx_bytes += bytes;
-  frn_tx_bytes_total += bytes;
+  rotateBuckets(ls, m);
+  ls.last_frn_tx_monotonic = mono_now_sec();
+  ls.buckets[ls.idx].frn_tx_bytes += bytes;
+  ls.frn_tx_bytes_total += bytes;
 }
 
-void SvxStats::addFrnRxBytes(uint64_t bytes)
+void SvxStats::addFrnRxBytes(const std::string& logic_name, uint64_t bytes)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+  ls.frn_enabled = true;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  last_frn_rx_monotonic = mono_now_sec();
-  buckets[idx].frn_rx_bytes += bytes;
-  frn_rx_bytes_total += bytes;
+  rotateBuckets(ls, m);
+  ls.last_frn_rx_monotonic = mono_now_sec();
+  ls.buckets[ls.idx].frn_rx_bytes += bytes;
+  ls.frn_rx_bytes_total += bytes;
 }
 
-void SvxStats::onSquelchState(bool is_open)
+void SvxStats::onSquelchState(const std::string& logic_name, bool is_open)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   double now = mono_now_sec();
 
-  if (is_open && !sql_active)
+  if (is_open && !ls.sql_active)
   {
-    sql_active = true;
-    sql_t0 = now;
+    ls.sql_active = true;
+    ls.sql_t0 = now;
   }
-  else if (!is_open && sql_active)
+  else if (!is_open && ls.sql_active)
   {
-    sql_active = false;
-    double sec = std::max(0.0, now - sql_t0);
-    duragg_add(buckets[idx].sql, sec);
-    duragg_add(sql_total, sec);
+    ls.sql_active = false;
+    double sec = std::max(0.0, now - ls.sql_t0);
+    duragg_add(ls.buckets[ls.idx].sql, sec);
+    duragg_add(ls.sql_total, sec);
   }
 }
 
-void SvxStats::onRfTxState(bool is_tx)
+void SvxStats::onRfTxState(const std::string& logic_name, bool is_tx)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   double now = mono_now_sec();
 
-  if (is_tx && !rf_tx_active)
+  if (is_tx && !ls.rf_tx_active)
   {
-    rf_tx_active = true;
-    rf_tx_t0 = now;
+    ls.rf_tx_active = true;
+    ls.rf_tx_t0 = now;
   }
-  else if (!is_tx && rf_tx_active)
+  else if (!is_tx && ls.rf_tx_active)
   {
-    rf_tx_active = false;
-    double sec = std::max(0.0, now - rf_tx_t0);
-    duragg_add(buckets[idx].rf_tx, sec);
-    duragg_add(rf_tx_total, sec);
+    ls.rf_tx_active = false;
+    double sec = std::max(0.0, now - ls.rf_tx_t0);
+    duragg_add(ls.buckets[ls.idx].rf_tx, sec);
+    duragg_add(ls.rf_tx_total, sec);
   }
 }
 
 
-void SvxStats::onRfRxState(bool is_rx)
+void SvxStats::onRfRxState(const std::string& logic_name, bool is_rx)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
+  rotateBuckets(ls, m);
   double now = mono_now_sec();
 
-  if (is_rx && !rf_rx_active)
+  if (is_rx && !ls.rf_rx_active)
   {
-    rf_rx_active = true;
-    rf_rx_t0 = now;
+    ls.rf_rx_active = true;
+    ls.rf_rx_t0 = now;
   }
-  else if (!is_rx && rf_rx_active)
+  else if (!is_rx && ls.rf_rx_active)
   {
-    rf_rx_active = false;
-    double sec = std::max(0.0, now - rf_rx_t0);
-    duragg_add(buckets[idx].rf_rx, sec);
-    duragg_add(rf_rx_total, sec);
+    ls.rf_rx_active = false;
+    double sec = std::max(0.0, now - ls.rf_rx_t0);
+    duragg_add(ls.buckets[ls.idx].rf_rx, sec);
+    duragg_add(ls.rf_rx_total, sec);
   }
 }
 
-void SvxStats::onCmdAccepted()
+void SvxStats::onCmdAccepted(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].cmd.ok++;
-  cmd_total.ok++;
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].cmd.ok++;
+  ls.cmd_total.ok++;
 }
 
-void SvxStats::onCmdRejected()
+void SvxStats::onCmdRejected(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].cmd.rej++;
-  cmd_total.rej++;
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].cmd.rej++;
+  ls.cmd_total.rej++;
 }
 
-void SvxStats::onCmdAuthFailed()
+void SvxStats::onCmdAuthFailed(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].cmd.authfail++;
-  cmd_total.authfail++;
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].cmd.authfail++;
+  ls.cmd_total.authfail++;
 }
 
-void SvxStats::onCmdBroadcastAttempt()
+void SvxStats::onCmdBroadcastAttempt(const std::string& logic_name)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  buckets[idx].cmd.bc_attempt++;
-  cmd_total.bc_attempt++;
+  rotateBuckets(ls, m);
+  ls.buckets[ls.idx].cmd.bc_attempt++;
+  ls.cmd_total.bc_attempt++;
 }
 
-void SvxStats::onCmdExecTimeMs(uint32_t ms)
+void SvxStats::onCmdExecTimeMs(const std::string& logic_name, uint32_t ms)
 {
+  LogicStats* selected = findLogic(logic_name);
+  if(!selected) return;
+  LogicStats& ls = *selected;
+
   uint64_t m = minute_now();
-  rotateBuckets(m);
-  cmdagg_add_ms(buckets[idx].cmd, ms);
-  cmdagg_add_ms(cmd_total, ms);
+  rotateBuckets(ls, m);
+  cmdagg_add_ms(ls.buckets[ls.idx].cmd, ms);
+  cmdagg_add_ms(ls.cmd_total, ms);
 }
 
 static inline void duragg_merge(SvxStats::DurAgg& out, const SvxStats::DurAgg& in)
@@ -448,11 +600,10 @@ static inline void cmdagg_merge(SvxStats::CmdAgg& out, const SvxStats::CmdAgg& i
   if (in.max_ms > out.max_ms) out.max_ms = in.max_ms;
 }
 
-std::string SvxStats::formatStatsLine()
+std::string SvxStats::formatLogicMetrics(LogicStats& ls, double now_s)
 {
   uint64_t now_m = minute_now();
-  rotateBuckets(now_m);
-  double now_s = mono_now_sec();
+  rotateBuckets(ls, now_m);
 
   // Aggregate last hour (60 buckets)
   DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h;
@@ -464,7 +615,7 @@ std::string SvxStats::formatStatsLine()
 
   for (size_t i = 0; i < NBUCKET; ++i)
   {
-    const Bucket& b = buckets[i];
+    const Bucket& b = ls.buckets[i];
     // only include last 60 minutes, including current
     if (b.minute + NBUCKET <= now_m) continue;
     duragg_merge(frn_tx_1h, b.frn_tx);
@@ -488,26 +639,28 @@ std::string SvxStats::formatStatsLine()
     oneh.sec += sec;
     total.sec += sec;
   };
-  DurAgg frn_tx_total_eff = frn_tx_total;
-  DurAgg frn_rx_total_eff = frn_rx_total;
-  DurAgg rf_tx_total_eff  = rf_tx_total;
-  DurAgg rf_rx_total_eff  = rf_rx_total;
+  DurAgg frn_tx_total_eff = ls.frn_tx_total;
+  DurAgg frn_rx_total_eff = ls.frn_rx_total;
+  DurAgg rf_tx_total_eff  = ls.rf_tx_total;
+  DurAgg rf_rx_total_eff  = ls.rf_rx_total;
 
-  add_active(frn_tx_active, frn_tx_t0, frn_tx_1h, frn_tx_total_eff);
-  add_active(frn_rx_active, frn_rx_t0, frn_rx_1h, frn_rx_total_eff);
-  add_active(rf_tx_active,  rf_tx_t0,  rf_tx_1h,  rf_tx_total_eff);
-  add_active(rf_rx_active,  rf_rx_t0,  rf_rx_1h,  rf_rx_total_eff);
+  add_active(ls.frn_tx_active, ls.frn_tx_t0, frn_tx_1h, frn_tx_total_eff);
+  add_active(ls.frn_rx_active, ls.frn_rx_t0, frn_rx_1h, frn_rx_total_eff);
+  add_active(ls.rf_tx_active,  ls.rf_tx_t0,  rf_tx_1h,  rf_tx_total_eff);
+  add_active(ls.rf_rx_active,  ls.rf_rx_t0,  rf_rx_1h,  rf_rx_total_eff);
 
   // unique users in last hour
   uint64_t unique_1h = 0;
-  for (const auto& kv : user_last_seen_minute)
+  for (const auto& kv : ls.user_last_seen_minute)
   {
     if (kv.second + NBUCKET > now_m) unique_1h++;
   }
 
   // peak users last hour: recompute as max of frn_users_cur and previous stored peak
   // (Updated in onTick)
-  uint64_t peak_1h = frn_users_peak_1h;
+  uint64_t peak_1h = ls.frn_users_cur;
+  for(size_t i=0; i<NBUCKET; ++i)
+    if(ls.buckets[i].minute + NBUCKET > now_m) peak_1h = std::max(peak_1h, ls.buckets[i].users_peak);
 
   // Derived: TX/RX hours total
   double rf_tx_hours_total = rf_tx_total_eff.sec / 3600.0;
@@ -521,31 +674,22 @@ std::string SvxStats::formatStatsLine()
     if (last <= 0.0) return -1;
     return (int64_t)std::llround(std::max(0.0, now_s - last));
   };
-  const int64_t frn_rx_age_s = age_s(last_frn_rx_monotonic);
-  const int64_t frn_tx_age_s = age_s(last_frn_tx_monotonic);
-  const int64_t frn_link_up_age_s = age_s(last_frn_link_up_monotonic);
-  const int64_t frn_link_down_age_s = age_s(last_frn_link_down_monotonic);
+  const int64_t frn_rx_age_s = age_s(ls.last_frn_rx_monotonic);
+  const int64_t frn_tx_age_s = age_s(ls.last_frn_tx_monotonic);
+  const int64_t frn_link_up_age_s = age_s(ls.last_frn_link_up_monotonic);
+  const int64_t frn_link_down_age_s = age_s(ls.last_frn_link_down_monotonic);
 
   std::ostringstream os;
   os.setf(std::ios::fixed);
-  os << "STATS"
-     << " stats_schema=3"
-     << " ts_unix_s=" << unix_now_sec()
-     << " uptime_s=" << uptimeSeconds()
-     << " linux_uptime_s=" << linuxUptimeSeconds()
-     << " svxlink_uptime_s=" << uptimeSeconds()
-     << " svxlink_software_version=" << stats_token(SVXLINK_APP_VERSION)
-     << " svxlink_software_revision=" << stats_token(PROJECT_VERSION)
-     << " linux_boot_id=" << linux_boot_id
-     << " frn_link_up_evt_1h=" << link_up_1h
+  os << "frn_link_up_evt_1h=" << link_up_1h
      << " frn_link_down_evt_1h=" << link_down_1h
-     << " frn_link_up_total=" << frn_link_up_total
-     << " frn_link_down_total=" << frn_link_down_total
+     << " frn_link_up_total=" << ls.frn_link_up_total
+     << " frn_link_down_total=" << ls.frn_link_down_total
      << " frn_link_up_age_s=" << frn_link_up_age_s
      << " frn_link_down_age_s=" << frn_link_down_age_s
      << " frn_rx_age_s=" << frn_rx_age_s
      << " frn_tx_age_s=" << frn_tx_age_s
-     << " frn_users=" << frn_users_cur
+     << " frn_users=" << ls.frn_users_cur
      << " frn_users_peak_1h=" << peak_1h
      << " frn_users_unique_1h=" << unique_1h
      << " frn_link_up_1h=" << link_up_1h
@@ -588,205 +732,134 @@ std::string SvxStats::formatStatsLine()
      << " cmd_max_ms_1h=" << cmd_1h.max_ms
      ;
 
+
+  DurAgg sql_1h;
+  for(size_t i=0; i<NBUCKET; ++i)
+    if(ls.buckets[i].minute + NBUCKET > now_m) duragg_merge(sql_1h, ls.buckets[i].sql);
+  if(ls.sql_active) sql_1h.sec += std::min(3600.0, std::max(0.0, now_s-ls.sql_t0));
+  os << " sql_evt_1h=" << sql_1h.evt << " sql_s_1h=" << sql_1h.sec
+     << " rf_tx_active=" << (ls.rf_tx_active ? 1 : 0)
+     << " rf_rx_active=" << (ls.rf_rx_active ? 1 : 0)
+     << " sql_active=" << (ls.sql_active ? 1 : 0)
+     << " frn_tx_active=" << (ls.frn_tx_active ? 1 : 0)
+     << " frn_rx_active=" << (ls.frn_rx_active ? 1 : 0)
+     << " frn_link_up=" << (ls.frn_link_up ? 1 : 0)
+     << " counter_epoch_unix_s=" << ls.counter_epoch_unix_s;
+  const std::string totals = formatLogicTotals(ls);
+  const std::string already_written = os.str();
+  std::istringstream total_fields(totals);
+  std::string field;
+  while(std::getline(total_fields, field))
+  {
+    const std::string key = field.substr(0, field.find('=')) + "=";
+    if(already_written.rfind(key, 0) == 0 || already_written.find(" " + key) != std::string::npos) continue;
+    os << " " << field;
+  }
+
+  return os.str();
+}
+
+
+std::string SvxStats::formatNodeStatsLine(double now_s) const
+{
+  std::ostringstream os;
+  os.setf(std::ios::fixed);
+  os << "STATS stats_schema=4 ts_unix_s=" << unix_now_sec()
+     << " uptime_s=" << uptimeSeconds() << " linux_uptime_s=" << linuxUptimeSeconds()
+     << " svxlink_uptime_s=" << uptimeSeconds()
+     << " svxlink_software_version=" << stats_token(SVXLINK_APP_VERSION)
+     << " svxlink_software_revision=" << stats_token(PROJECT_VERSION)
+     << " linux_boot_id=" << linux_boot_id
+     << " logic_count=" << logic_order.size()
+     << " logic_registry_error=" << registry_error
+     << " legacy_logic_totals_available=" << (legacy_totals_available ? 1 : 0);
+  if(!primary_logic.empty()) os << " primary_logic=" << logic_token(primary_logic);
   appendAiorsStats(os, now_s);
   return os.str();
 }
 
+std::string SvxStats::formatStatsLine()
+{
+  const double now_s = mono_now_sec();
+  std::ostringstream os;
+  os << formatNodeStatsLine(now_s);
+  for(size_t slot=0; slot<logic_order.size(); ++slot) {
+    LogicStats& ls = logic_states.at(logic_order[slot]);
+    const std::string metrics = formatLogicMetrics(ls, now_s);
+    if(ls.name == primary_logic) os << " " << metrics; // Temporary legacy aliases.
+    const std::string prefix = "logic" + std::to_string(slot) + "_";
+    os << " " << prefix << "name=" << logic_token(ls.name)
+       << " " << prefix << "type=" << logic_token(ls.type)
+       << " " << prefix << "callsign=" << logic_token(ls.callsign)
+       << " " << prefix << "rx=" << logic_token(ls.rx)
+       << " " << prefix << "tx=" << logic_token(ls.tx)
+       << " " << prefix << "state=" << stats_token(ls.state)
+       << " " << prefix << "frn_enabled=" << (ls.frn_enabled ? 1 : 0);
+    std::istringstream fields(metrics);
+    std::string field;
+    while(fields >> field) os << " " << prefix << field;
+  }
+  return os.str();
+}
+
+static void append_diagnostic_groups(std::vector<std::string>& groups,
+                                     const std::string& header, const std::string& text)
+{
+  std::istringstream fields(text);
+  std::string field, line = header;
+  while(fields >> field) {
+    if(field == "STATS") continue;
+    if(line.size()+field.size()+1 > 700 && line.size() > header.size()) {
+      groups.push_back(line); line = header;
+    }
+    line += " " + field;
+  }
+  if(line.size() > header.size()) groups.push_back(line);
+}
+
+std::vector<std::string> SvxStats::formatDiagnosticGroups(const std::string& scope,
+                                                         const std::string& name)
+{
+  std::vector<std::string> groups;
+  const double now_s = mono_now_sec();
+  if(scope != "node" && scope != "logic" && scope != "all") return groups;
+  if(scope == "node" || scope == "all")
+    append_diagnostic_groups(groups, "DIAGNOSTICS scope=node", formatNodeStatsLine(now_s));
+  for(const auto& configured : logic_order) {
+    if(scope == "node" || (scope == "logic" && configured != name)) continue;
+    LogicStats& ls = logic_states.at(configured);
+    std::ostringstream details;
+    details << "type=" << logic_token(ls.type) << " state=" << ls.state
+            << " callsign=" << logic_token(ls.callsign) << " rx=" << logic_token(ls.rx)
+            << " tx=" << logic_token(ls.tx) << " frn_enabled=" << (ls.frn_enabled ? 1 : 0);
+    std::istringstream metrics(formatLogicMetrics(ls, now_s));
+    std::string field;
+    while(metrics >> field) {
+      const size_t eq = field.find('=');
+      const std::string key = field.substr(0,eq);
+      if((ls.state != "ready" && key != "counter_epoch_unix_s") ||
+         (!ls.frn_enabled && (key.rfind("frn_",0)==0 || key.rfind("cmd_",0)==0)))
+        field = key + "=na";
+      details << " " << field;
+    }
+    append_diagnostic_groups(groups, "DIAGNOSTICS scope=logic logic="+logic_token(ls.name), details.str());
+  }
+  return groups;
+}
+
 std::vector<std::string> SvxStats::formatStatsGroups()
 {
-  uint64_t now_m = minute_now();
-  rotateBuckets(now_m);
-  double now_s = mono_now_sec();
-
-  DurAgg frn_tx_1h, frn_rx_1h, rf_tx_1h, rf_rx_1h;
-  CmdAgg cmd_1h;
-  uint64_t frn_tx_bytes_1h = 0, frn_rx_bytes_1h = 0;
-  uint64_t join_1h = 0, leave_1h = 0;
-  uint64_t link_up_1h = 0, link_down_1h = 0;
-
-  for (size_t i = 0; i < NBUCKET; ++i)
-  {
-    const Bucket& b = buckets[i];
-    if (b.minute + NBUCKET <= now_m) continue;
-    duragg_merge(frn_tx_1h, b.frn_tx);
-    duragg_merge(frn_rx_1h, b.frn_rx);
-    duragg_merge(rf_tx_1h, b.rf_tx);
-    duragg_merge(rf_rx_1h, b.rf_rx);
-    cmdagg_merge(cmd_1h, b.cmd);
-    frn_tx_bytes_1h += b.frn_tx_bytes;
-    frn_rx_bytes_1h += b.frn_rx_bytes;
-    link_up_1h += b.frn_link_up;
-    link_down_1h += b.frn_link_down;
-    join_1h += b.user_join;
-    leave_1h += b.user_leave;
-  }
-
-  auto add_active = [&](bool active, double t0, DurAgg& oneh, DurAgg& total)
-  {
-    if (!active) return;
-    double sec = std::max(0.0, now_s - t0);
-    oneh.sec += sec;
-    total.sec += sec;
-  };
-
-  DurAgg frn_tx_total_eff = frn_tx_total;
-  DurAgg frn_rx_total_eff = frn_rx_total;
-  DurAgg rf_tx_total_eff  = rf_tx_total;
-  DurAgg rf_rx_total_eff  = rf_rx_total;
-
-  add_active(frn_tx_active, frn_tx_t0, frn_tx_1h, frn_tx_total_eff);
-  add_active(frn_rx_active, frn_rx_t0, frn_rx_1h, frn_rx_total_eff);
-  add_active(rf_tx_active,  rf_tx_t0,  rf_tx_1h,  rf_tx_total_eff);
-  add_active(rf_rx_active,  rf_rx_t0,  rf_rx_1h,  rf_rx_total_eff);
-
-  uint64_t unique_1h = 0;
-  for (const auto& kv : user_last_seen_minute)
-  {
-    if (kv.second + NBUCKET > now_m) unique_1h++;
-  }
-  uint64_t peak_1h = frn_users_peak_1h;
-
-  auto pct = [](double sec) -> double { return std::min(100.0, std::max(0.0, sec * 100.0 / 3600.0)); };
-  auto sec_u64 = [](double sec) -> uint64_t { return (uint64_t)std::llround(std::max(0.0, sec)); };
-
-  auto age_s = [&](double last) -> int64_t {
-    if (last <= 0.0) return -1;
-    return (int64_t)std::llround(std::max(0.0, now_s - last));
-  };
-  const int64_t frn_rx_age_s = age_s(last_frn_rx_monotonic);
-  const int64_t frn_tx_age_s = age_s(last_frn_tx_monotonic);
-  const int64_t frn_link_up_age_s = age_s(last_frn_link_up_monotonic);
-  const int64_t frn_link_down_age_s = age_s(last_frn_link_down_monotonic);
-
-  std::vector<std::string> out;
-  out.reserve(8);
-
-  // General / users
-  {
-    std::ostringstream os;
-    os << "STATS uptime=" << uptimeSeconds() << "s"
-       << " users=" << frn_users_cur
-       << " peak1h=" << peak_1h
-       << " uniq1h=" << unique_1h
-       << " linkup1h=" << link_up_1h
-       << " linkdown1h=" << link_down_1h
-       << " linkup_total=" << frn_link_up_total
-       << " linkdown_total=" << frn_link_down_total
-       << " linkup_age=" << frn_link_up_age_s << "s"
-       << " linkdown_age=" << frn_link_down_age_s << "s"
-       << " rx_age=" << frn_rx_age_s << "s"
-       << " tx_age=" << frn_tx_age_s << "s"
-       << " join1h=" << join_1h
-       << " leave1h=" << leave_1h;
-    out.push_back(os.str());
-  }
-
-  // FRN TX
-  {
-    std::ostringstream os;
-    os.setf(std::ios::fixed);
-    os << "FRN TX 1h evt=" << frn_tx_1h.evt
-       << " t=" << sec_u64(frn_tx_1h.sec) << "s"
-       << " min=" << (frn_tx_1h.min_sec > 0.0 ? frn_tx_1h.min_sec : 0.0) << "s"
-       << " max=" << frn_tx_1h.max_sec << "s"
-       << " duty=" << pct(frn_tx_1h.sec) << "% "
-       << "bytes=" << frn_tx_bytes_1h;
-    out.push_back(os.str());
-  }
-
-  // FRN RX
-  {
-    std::ostringstream os;
-    os.setf(std::ios::fixed);
-    os << "FRN RX 1h evt=" << frn_rx_1h.evt
-       << " t=" << sec_u64(frn_rx_1h.sec) << "s"
-       << " min=" << (frn_rx_1h.min_sec > 0.0 ? frn_rx_1h.min_sec : 0.0) << "s"
-       << " max=" << frn_rx_1h.max_sec << "s"
-       << " duty=" << pct(frn_rx_1h.sec) << "% "
-       << "bytes=" << frn_rx_bytes_1h;
-    out.push_back(os.str());
-  }
-
-  // RF TX
-  {
-    std::ostringstream os;
-    os.setf(std::ios::fixed);
-    os << "RF TX 1h evt=" << rf_tx_1h.evt
-       << " t=" << sec_u64(rf_tx_1h.sec) << "s"
-       << " min=" << (rf_tx_1h.min_sec > 0.0 ? rf_tx_1h.min_sec : 0.0) << "s"
-       << " max=" << rf_tx_1h.max_sec << "s"
-       << " duty=" << pct(rf_tx_1h.sec) << "% "
-       << "total=" << (rf_tx_total_eff.sec / 3600.0) << "h";
-    out.push_back(os.str());
-  }
-
-  // RF RX (squelch-open based)
-  {
-    std::ostringstream os;
-    os.setf(std::ios::fixed);
-    os << "RF RX 1h evt=" << rf_rx_1h.evt
-       << " t=" << sec_u64(rf_rx_1h.sec) << "s"
-       << " min=" << (rf_rx_1h.min_sec > 0.0 ? rf_rx_1h.min_sec : 0.0) << "s"
-       << " max=" << rf_rx_1h.max_sec << "s"
-       << " duty=" << pct(rf_rx_1h.sec) << "% "
-       << "total=" << (rf_rx_total_eff.sec / 3600.0) << "h";
-    out.push_back(os.str());
-  }
-
-  // CMD
-  {
-    std::ostringstream os;
-    os << "CMD 1h ok=" << cmd_1h.ok
-       << " rej=" << cmd_1h.rej
-       << " auth=" << cmd_1h.authfail
-       << " bc=" << cmd_1h.bc_attempt
-       << " avg=" << (cmd_1h.cnt_ms ? (cmd_1h.sum_ms / cmd_1h.cnt_ms) : 0) << "ms"
-       << " max=" << cmd_1h.max_ms << "ms";
-    out.push_back(os.str());
-  }
-
-  if (aiors_diagnostics_enabled)
-  {
-    const AiorsSample* current = aiors_samples.empty() ? nullptr : &aiors_samples.back();
-    std::ostringstream os;
-    os << "RADIOS";
-    for (size_t radio = 0; radio < AIORS_RADIO_COUNT; ++radio)
-      os << " " << aiors_radio_names[radio] << "="
-         << (current ? current->radio_states[radio] : "na");
-    os << " sample_ok=" << (last_aiors_attempt_ok ? 1 : 0)
-       << " age=" << age_s(last_aiors_success_monotonic) << "s";
-    out.push_back(os.str());
-  }
-
-  return out;
+  return formatDiagnosticGroups("all");
 }
+
 
 
 void SvxStats::onTick(Async::Timer* /*t*/)
 {
+  initial_report_pending = false;
   // Update peak users in last hour: use current users as a sample
   // This is a conservative peak, but for practical use it's fine. To get exact,
   // we'd need store user counts per minute. We'll do that quickly by keeping peak.
-  uint64_t now_m = minute_now();
-  rotateBuckets(now_m);
-
-  // Track peak in a rolling manner: we need reset when hour window moves.
-  // We recompute peak by scanning buckets would require stored counts, so instead
-  // we approximate by decaying peak when no client list updates. We'll recompute
-  // as max(current, previous_peak) and reset once per hour boundary by using
-  // a simple guard: if peak is older than 60m, reset. We'll store peak minute in map.
-  static uint64_t peak_set_minute = 0;
-  if (peak_set_minute + NBUCKET <= now_m)
-  {
-    frn_users_peak_1h = frn_users_cur;
-    peak_set_minute = now_m;
-  }
-  if (frn_users_cur > frn_users_peak_1h)
-  {
-    frn_users_peak_1h = frn_users_cur;
-    peak_set_minute = now_m;
-  }
-
   const std::string line = formatStatsLine();
   if (log_to_stdout)
   {
@@ -911,6 +984,7 @@ void SvxStats::onAiorsDiagnosticsExited()
   last_aiors_attempt_ok = true;
   last_aiors_error = "none";
   trimAiorsHistory(now_s);
+  if(started && initial_report_pending) onTick(nullptr);
 }
 
 void SvxStats::recordAiorsFailure(const std::string& reason)
@@ -922,6 +996,7 @@ void SvxStats::recordAiorsFailure(const std::string& reason)
   ++aiors_totals.failure_samples;
   aiors_failure_times.push_back(now_s);
   trimAiorsHistory(now_s);
+  if(started && initial_report_pending) onTick(nullptr);
 }
 
 bool SvxStats::parseAiorsDiagnostics(const std::string& text,
@@ -1715,9 +1790,30 @@ void SvxStats::loadPersistedTotals()
     size_t eq = line.find('=');
     if (eq == std::string::npos)
       continue;
-    const std::string k = line.substr(0, eq);
+    std::string k = line.substr(0, eq);
     const std::string v = line.substr(eq + 1);
 
+
+    LogicStats* selected = &legacy_totals;
+    if(k.rfind("logic.", 0) == 0) {
+      const size_t separator = k.find('.', 6);
+      std::string decoded;
+      if(separator == std::string::npos || !decode_logic_token(k.substr(6, separator-6), decoded)) continue;
+      selected = findLogic(decoded);
+      if(!selected) continue;
+      k = k.substr(separator+1);
+    } else if(k.rfind("legacy.", 0) == 0) {
+      k = k.substr(7);
+    }
+    LogicStats& ls = *selected;
+    if(selected == &legacy_totals &&
+       (k.rfind("rf_",0)==0 || k.rfind("frn_",0)==0 || k.rfind("cmd_",0)==0 ||
+        k.rfind("sq_",0)==0 || k.rfind("sql_",0)==0)) legacy_totals_available = true;
+    if(k == "counter_epoch_unix_s") {
+      uint64_t epoch=0;
+      if(parse_u64_strict(v, epoch)) ls.counter_epoch_unix_s=epoch;
+      continue;
+    }
     auto parse_u64 = [&](uint64_t& dst) {
       try { dst = (uint64_t)std::stoull(v); } catch (...) {}
     };
@@ -1740,26 +1836,27 @@ void SvxStats::loadPersistedTotals()
     if (status_total) continue;
 
     // New (v4) persisted totals
-    if (k == "rf_tx_s_total") parse_d(rf_tx_total.sec);
-    else if (k == "rf_tx_evt_total") parse_u64(rf_tx_total.evt);
-    else if (k == "rf_rx_s_total") parse_d(rf_rx_total.sec);
-    else if (k == "rf_rx_evt_total") parse_u64(rf_rx_total.evt);
-    else if (k == "sq_open_s_total") parse_d(sql_total.sec);
-    else if (k == "sq_evt_total") parse_u64(sql_total.evt);
-    else if (k == "frn_tx_s_total") parse_d(frn_tx_total.sec);
-    else if (k == "frn_tx_evt_total") parse_u64(frn_tx_total.evt);
-    else if (k == "frn_rx_s_total") parse_d(frn_rx_total.sec);
-    else if (k == "frn_rx_evt_total") parse_u64(frn_rx_total.evt);
-    else if (k == "cmd_ok_total") parse_u64(cmd_total.ok);
-    else if (k == "cmd_rej_total") parse_u64(cmd_total.rej);
-    else if (k == "cmd_authfail_total") parse_u64(cmd_total.authfail);
-    else if (k == "cmd_bc_attempt_total") parse_u64(cmd_total.bc_attempt);
-    else if (k == "cmd_sum_ms_total") parse_u64(cmd_total.sum_ms);
-    else if (k == "cmd_max_ms_total") parse_u64(cmd_total.max_ms);
-    else if (k == "frn_tx_bytes_total") parse_u64(frn_tx_bytes_total);
-    else if (k == "frn_rx_bytes_total") parse_u64(frn_rx_bytes_total);
-    else if (k == "frn_link_up_total") parse_u64(frn_link_up_total);
-    else if (k == "frn_link_down_total") parse_u64(frn_link_down_total);
+    if (k == "rf_tx_s_total") parse_d(ls.rf_tx_total.sec);
+    else if (k == "rf_tx_evt_total") parse_u64(ls.rf_tx_total.evt);
+    else if (k == "rf_rx_s_total") parse_d(ls.rf_rx_total.sec);
+    else if (k == "rf_rx_evt_total") parse_u64(ls.rf_rx_total.evt);
+    else if (k == "sq_open_s_total") parse_d(ls.sql_total.sec);
+    else if (k == "sq_evt_total") parse_u64(ls.sql_total.evt);
+    else if (k == "frn_tx_s_total") parse_d(ls.frn_tx_total.sec);
+    else if (k == "frn_tx_evt_total") parse_u64(ls.frn_tx_total.evt);
+    else if (k == "frn_rx_s_total") parse_d(ls.frn_rx_total.sec);
+    else if (k == "frn_rx_evt_total") parse_u64(ls.frn_rx_total.evt);
+    else if (k == "cmd_ok_total") parse_u64(ls.cmd_total.ok);
+    else if (k == "cmd_rej_total") parse_u64(ls.cmd_total.rej);
+    else if (k == "cmd_authfail_total") parse_u64(ls.cmd_total.authfail);
+    else if (k == "cmd_bc_attempt_total") parse_u64(ls.cmd_total.bc_attempt);
+    else if (k == "cmd_sum_ms_total") parse_u64(ls.cmd_total.sum_ms);
+    else if (k == "cmd_count_ms_total") parse_u64(ls.cmd_total.cnt_ms);
+    else if (k == "cmd_max_ms_total") parse_u64(ls.cmd_total.max_ms);
+    else if (k == "frn_tx_bytes_total") parse_u64(ls.frn_tx_bytes_total);
+    else if (k == "frn_rx_bytes_total") parse_u64(ls.frn_rx_bytes_total);
+    else if (k == "frn_link_up_total") parse_u64(ls.frn_link_up_total);
+    else if (k == "frn_link_down_total") parse_u64(ls.frn_link_down_total);
     else if (k == "aiors_samples_ok_total") parse_u64(aiors_totals.success_samples);
     else if (k == "aiors_samples_failed_total") parse_u64(aiors_totals.failure_samples);
     else if (k == "aiors_restart_evt_total") parse_u64(aiors_totals.restart_events);
@@ -1787,13 +1884,43 @@ void SvxStats::loadPersistedTotals()
     else if (k == "aiors_fault_s_total") parse_d(aiors_totals.fault_s);
 
     // Legacy keys (older experiments)
-    else if (k == "rf_tx_hours_total") { double h=0; parse_d(h); rf_tx_total.sec = h * 3600.0; }
-    else if (k == "rf_tx_total") { uint64_t v0=0; parse_u64(v0); rf_tx_total.evt = v0; }
-    else if (k == "sql_total") { uint64_t v0=0; parse_u64(v0); sql_total.evt = v0; }
-    else if (k == "cmd_total") { uint64_t v0=0; parse_u64(v0); cmd_total.ok = v0; }
-    else if (k == "frn_tx_total") { uint64_t v0=0; parse_u64(v0); frn_tx_total.evt = v0; }
-    else if (k == "frn_rx_total") { uint64_t v0=0; parse_u64(v0); frn_rx_total.evt = v0; }
+    else if (k == "rf_tx_hours_total") { double h=0; parse_d(h); ls.rf_tx_total.sec = h * 3600.0; }
+    else if (k == "rf_tx_total") { uint64_t v0=0; parse_u64(v0); ls.rf_tx_total.evt = v0; }
+    else if (k == "sql_total") { uint64_t v0=0; parse_u64(v0); ls.sql_total.evt = v0; }
+    else if (k == "cmd_total") { uint64_t v0=0; parse_u64(v0); ls.cmd_total.ok = v0; }
+    else if (k == "frn_tx_total") { uint64_t v0=0; parse_u64(v0); ls.frn_tx_total.evt = v0; }
+    else if (k == "frn_rx_total") { uint64_t v0=0; parse_u64(v0); ls.frn_rx_total.evt = v0; }
   }
+}
+
+
+std::string SvxStats::formatLogicTotals(const LogicStats& ls) const
+{
+  std::ostringstream o;
+  o << std::setprecision(17);
+  o << "rf_tx_s_total=" << ls.rf_tx_total.sec << "\n";
+  o << "rf_tx_evt_total=" << ls.rf_tx_total.evt << "\n";
+  o << "rf_rx_s_total=" << ls.rf_rx_total.sec << "\n";
+  o << "rf_rx_evt_total=" << ls.rf_rx_total.evt << "\n";
+  o << "sq_open_s_total=" << ls.sql_total.sec << "\n";
+  o << "sq_evt_total=" << ls.sql_total.evt << "\n";
+  o << "frn_tx_s_total=" << ls.frn_tx_total.sec << "\n";
+  o << "frn_tx_evt_total=" << ls.frn_tx_total.evt << "\n";
+  o << "frn_rx_s_total=" << ls.frn_rx_total.sec << "\n";
+  o << "frn_rx_evt_total=" << ls.frn_rx_total.evt << "\n";
+  o << "cmd_ok_total=" << ls.cmd_total.ok << "\n";
+  o << "cmd_rej_total=" << ls.cmd_total.rej << "\n";
+  o << "cmd_authfail_total=" << ls.cmd_total.authfail << "\n";
+  o << "cmd_bc_attempt_total=" << ls.cmd_total.bc_attempt << "\n";
+  o << "cmd_sum_ms_total=" << ls.cmd_total.sum_ms << "\n";
+  o << "cmd_max_ms_total=" << ls.cmd_total.max_ms << "\n";
+  o << "frn_tx_bytes_total=" << ls.frn_tx_bytes_total << "\n";
+  o << "frn_rx_bytes_total=" << ls.frn_rx_bytes_total << "\n";
+  o << "frn_link_up_total=" << ls.frn_link_up_total << "\n";
+  o << "frn_link_down_total=" << ls.frn_link_down_total << "\n";
+  o << "cmd_count_ms_total=" << ls.cmd_total.cnt_ms << "\n";
+  o << "counter_epoch_unix_s=" << ls.counter_epoch_unix_s << "\n";
+  return o.str();
 }
 
 void SvxStats::savePersistedTotals()
@@ -1804,26 +1931,15 @@ void SvxStats::savePersistedTotals()
   std::ostringstream o;
 
   o << std::setprecision(17);
-  o << "rf_tx_s_total=" << rf_tx_total.sec << "\n";
-  o << "rf_tx_evt_total=" << rf_tx_total.evt << "\n";
-  o << "rf_rx_s_total=" << rf_rx_total.sec << "\n";
-  o << "rf_rx_evt_total=" << rf_rx_total.evt << "\n";
-  o << "sq_open_s_total=" << sql_total.sec << "\n";
-  o << "sq_evt_total=" << sql_total.evt << "\n";
-  o << "frn_tx_s_total=" << frn_tx_total.sec << "\n";
-  o << "frn_tx_evt_total=" << frn_tx_total.evt << "\n";
-  o << "frn_rx_s_total=" << frn_rx_total.sec << "\n";
-  o << "frn_rx_evt_total=" << frn_rx_total.evt << "\n";
-  o << "cmd_ok_total=" << cmd_total.ok << "\n";
-  o << "cmd_rej_total=" << cmd_total.rej << "\n";
-  o << "cmd_authfail_total=" << cmd_total.authfail << "\n";
-  o << "cmd_bc_attempt_total=" << cmd_total.bc_attempt << "\n";
-  o << "cmd_sum_ms_total=" << cmd_total.sum_ms << "\n";
-  o << "cmd_max_ms_total=" << cmd_total.max_ms << "\n";
-  o << "frn_tx_bytes_total=" << frn_tx_bytes_total << "\n";
-  o << "frn_rx_bytes_total=" << frn_rx_bytes_total << "\n";
-  o << "frn_link_up_total=" << frn_link_up_total << "\n";
-  o << "frn_link_down_total=" << frn_link_down_total << "\n";
+
+  o << "persist_schema=2\n";
+  auto append_totals = [&](const std::string& prefix, const LogicStats& ls) {
+    std::istringstream rows(formatLogicTotals(ls));
+    std::string row;
+    while(std::getline(rows,row)) o << prefix << row << "\n";
+  };
+  for(const auto& item : logic_states) append_totals("logic."+logic_token(item.first)+".", item.second);
+  if(legacy_totals_available) append_totals("legacy.", legacy_totals);
   o << "aiors_samples_ok_total=" << aiors_totals.success_samples << "\n";
   o << "aiors_samples_failed_total=" << aiors_totals.failure_samples << "\n";
   o << "aiors_restart_evt_total=" << aiors_totals.restart_events << "\n";
